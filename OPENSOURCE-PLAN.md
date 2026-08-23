@@ -1,8 +1,14 @@
 # 开源规划：DSH Desktop for macOS
 
+# 开源改造规划与决策记录
+
+> 这是**设计与决策记录**，不是用户文档——用户文档是 [README.zh.md](README.zh.md)
+> （英文见 [README.md](README.md)）。这里记的是每个决定背后的理由、被排除的方案、
+> 以及试过又撤掉的东西，好让下一个读者不必把同样的推导重做一遍。
+>
 > 目标：把一个自用的 macOS 启动器，打磨成面向大众的、合规的、可持续维护的开源产品。
 > 本文是规划文档（非法律意见）；商标/许可条目均标注了"需核实"。
-> **决策状态（v2）**：✅ 已锁定 / ⏳ 待定 / 🔲 已否决
+> **决策状态**：✅ 已锁定 / ⏳ 待定 / ❌ 试过又撤掉 / 🔲 已否决
 
 ---
 
@@ -203,28 +209,35 @@ mfw 为了支持多选目录，**禁用了 DSH 的 native picker**，改用页�
 
 ### 5.1 仓库结构
 
+现状（✅ 已落地 / ⏳ 未做）：
+
 ```
 deepseek-harness-desktop-for-macos/
 ├── LICENSE                  # ✅ MIT，署名 Boy-Grid
-├── THIRD_PARTY_NOTICES.md   # DSH MIT 声明 + favicon 出处标注 + 在线安装依赖声明
-├── README.md                # 重写：双语、功能截图、安装、FAQ、免责声明
-├── CONTRIBUTING.md
-├── CODE_OF_CONDUCT.md
-├── SECURITY.md
-├── CHANGELOG.md             # semver
-├── Sources/                 # LauncherAgent.swift 拆分为模块：
-│   ├── App/                 #   启动、Dock、单实例、About 面板
-│   ├── UI/                  #   窗口、标签栏、动画、偏好设置
-│   ├── Web/                 #   WKWebView 管理、外链策略、JS 注入
-│   ├── DSH/                 #   后端解析（stock/mfw）、运行时探测/在线安装/版本
-│   └── Update/              #   更新检查
-├── cli/launcher             # 现有 bash CLI（或迁移到 Sources/CLI）
-├── scripts/build.sh         # --release（签名+公证）/ --debug（ad-hoc）
-├── scripts/make-dmg.sh      # DMG 打包 + 装订
-├── tests/                   # ✅ 已落地：run.sh + lib/assert.sh + t-*.sh + fixtures/（纯 bash，见 §5.3）
-├── .github/workflows/       # ✅ CI 已落地（§5.2）；⏳ 发布流水线等 Apple 账号
-└── make-icon.py             # 保留（favicon 派生图标流程，文档标注出处）
+├── THIRD_PARTY_NOTICES.md   # ✅ DSH MIT 声明 + favicon 出处 + 只描述现状
+├── README.md                # ✅ 英文主文档（含 CI / 许可 / 最低系统版本 badge）
+├── README.zh.md             # ✅ 中文
+├── CONTRIBUTING.md          # ✅ 环境、测试、代码约定、反向验证要求、PR 流程
+├── SECURITY.md              # ✅ 报告流程 + 安全模型（进程归属、写面、签名状态、本地数据）
+├── Resources-README.md      # ✅ 打进 bundle 的简版说明
+├── CODE_OF_CONDUCT.md       # ⏳
+├── CHANGELOG.md             # ⏳ semver
+├── main.swift               # ✅ 入口（顶层语句只能在这里）
+├── LauncherAgent.swift      # ⏳ 仍是单文件 GUI 主体，继续拆分见 M3 剩余项
+├── Preferences.swift        # ✅ 设置模型 + 首次询问 + 偏好设置窗口
+├── TabStore.swift           # ✅ 每标签持久存储的创建/删除/孤立清理
+├── launcher                 # ✅ 实例生命周期唯一事实来源（GUI 也调它）
+├── build.sh                 # ✅ 组装 + 编译 + ad-hoc 签名 + 注册；⏳ --release（Developer ID + 公证）
+├── scripts/make-dmg.sh      # ⏳ DMG 打包 + 装订
+├── tests/                   # ✅ run.sh + lib/assert.sh + t-*.sh + fixtures/（纯 bash，见 §5.3）
+├── .github/workflows/ci.yml # ✅ CI（§5.2）；⏳ 发布流水线（M4）
+└── make-icon.py             # ✅ 保留（favicon 派生图标流程，文档标注出处）
 ```
+
+> 原计划把 Swift 侧拆成 `Sources/{App,UI,Web,DSH,Update}/`。实际只拆出了
+> `main` / `Preferences` / `TabStore` 三个文件——够用，且每一个都有清晰的边界。剩下的
+> `LauncherAgent.swift` 仍是 1800 余行，继续拆的价值在于给纯逻辑加 XCTest（M3 剩余项），
+> 而不是为了目录好看。
 
 ### 5.2 CI（GitHub Actions）—— ✅ 已落地
 
@@ -243,14 +256,18 @@ deepseek-harness-desktop-for-macos/
 
 `tests/run.sh` 跑全部 `tests/t-*.sh`，**零外部依赖**（不引入 bats：应用本身没有运行时依赖，CI 也不该为了检查它去装一个）。跳过的用例会在汇总里重复列出——在这台机器上跑不了的用例不能读成通过。
 
+断言数是撰写时的快照，会随开发变化——用户文档里因此不写具体数字，只有这里记。
+
 | 文件 | 覆盖 | 断言数 |
 |---|---|---|
-| `t-01-resolve` | `realpath_of`、`child_path`、`node_major`、`pkg_version`、`proc_tree`、`port_listener` 降级 | 19 |
+| `t-01-resolve` | `realpath_of`、`child_path`、`node_major`、`pkg_version`、`proc_tree`、`pnpm_locate`、`port_listener` 降级 | 23 |
 | `t-02-args` | 后端校验、状态目录分区（含 stock+3080 沿用历史路径）、DSH_HOME 解析与 isolated 判定、help 覆盖全部选项 | 28 |
 | `t-03-mfw-guards` | 版本错开守卫五种情形、Node 门槛、包管理器缺失、mfw 不传 `--profile`。**全程用假 node / 假 dsh / 假 dsh-mfw**，两者都没装的机器上也能跑 | 19 |
 | `t-04-safety` | 「只停自己启动的服务」：无 pid 记录、死 pid、活 pid 但不是监听者（pid 复用）、确属自己、端口空闲 | 19 |
-| `t-05-lint` | `bash -n`、shellcheck（`-x` 跟进 source）、中文旁未加花括号的变量引用、`set -u` 仍在、Info.plist 与 M0 身份决策 | 39 |
+| `t-05-lint` | `bash -n`、shellcheck（`-x` 跟进 source）、中文旁未加花括号的变量引用、`set -u` 仍在、Info.plist 与 M0 身份决策、部署目标守卫 | 45 |
 | `t-06-boot` | 启动全程：参数构造、PATH 与 DSH_HOME 传递、pid 记录、就绪轮询、归属、停止、子进程立刻退出时快速报错。用 `fixtures/fake-dsh.mjs` 与 `fake-mfw.mjs` 替身，不需要真的装 DSH | 26 |
+| `t-07-backend-switch` | 同端口换后端：一个后端的实例只能被它自己停止；`start` 不得把别人的服务当成自己的而误报成功 | 16 |
+| `t-08-docs` | 文档一致性：相对链接不断、双语 README 互链、badge 指向的 workflow 存在、bundle 内说明不自指、SECURITY 仍载明写面扩大 | 见文件 |
 
 两条工程约定：
 
@@ -297,7 +314,7 @@ deepseek-harness-desktop-for-macos/
 |---|---|---|
 | **M0 法律与品牌** | LICENSE（MIT）、THIRD_PARTY_NOTICES（含 favicon 出处）、更名 "DSH Desktop for macOS"、bundle ID、窗口标题去商标、About 面板、版本号归零、文档只描述已实现行为 | 0.5–1 天 |
 | **M1 双后端** | `launcher` 后端抽象（stock/mfw）、node realpath 注入 PATH、Node ≥ 22 校验、两段式 provision、版本错开守卫、DSH home 自定义、per-(后端,端口) 状态目录、owner 判定改完整子树 | 1–2 天 |
-| **M2 工程化与 CI** | ✅ 测试套件（6 文件 / 150 断言，覆盖"绝不杀他人进程"、归属判定、后端与路径解析、启动全程）+ shellcheck + 自定义 lint + GitHub Actions 两个 job。⏳ 剩 CONTRIBUTING/SECURITY、双语 README | 1–2 天 |
+| **M2 工程化与 CI** | ✅ 测试套件（7 文件 / 176 断言，覆盖"绝不杀他人进程"、归属判定、后端与路径解析、mfw 守卫、启动全程）+ shellcheck + 自定义 lint + GitHub Actions 两个 job（已在真实 runner 上跑通）+ 英文主 README 与中文 README.zh + CONTRIBUTING + SECURITY。⏳ 剩 CODE_OF_CONDUCT、CHANGELOG | 1–2 天 |
 | **M3 应用正规化** | ✅ 偏好设置（后端切换 + 首次询问 + DSH home）、每标签持久存储 + 标签重命名、退出改异步（不再卡 UI）、部署目标与 plist 对齐。⏳ 剩 `LauncherAgent.swift` 继续拆模块（已分出 `main`/`Preferences`/`TabStore`）、卸载入口、日志轮转 | 2–3 天 |
 | **M4 分发** | Apple Developer 账号、Developer ID 签名 + 公证 + 装订、通用二进制、DMG 制作、SHA256SUMS、Release 自动化、检查更新（后期 Sparkle） | 3–5 天（含账号审批等待） |
 | **M5 托管运行时** | 一键在线安装 node + dsh/dsh-mfw、首次运行向导、断网降级、`launcher dsh` 子命令、磁盘占用如实告知（双层缓存 350 MB+） | 3–5 天 |
@@ -333,7 +350,7 @@ deepseek-harness-desktop-for-macos/
 | **「启动工作目录」偏好项** | 原以为它决定新会话的默认工作目录——那是照 dsh-mfw 里一句注释（"DSH derives a session's default working directory from where it was launched"）做的推断，没查证就写进了 UI。实际查证：`dsh-tool-bash` 的 `resolveWorkdir()` 取 `policy.workspaceRoot`，其次是会话头的 `cwd`；web UI 建会话时的 `cwd` 来自**工作区行**；`process.cwd()` 只有 **headless 模式**用来播种会话（`dsh-headless/lib/index.js:72`），以及 `dsh-bash-local` 里的第三层兜底；目录选择器起点是 `homedir()`。也就是说这个设置在本应用的实际路径上不改变任何可观察行为——一个不改变行为、还配着错误说明的旋钮比没有更糟。**保留**的只是「不把 `/` 继承给子进程」这个卫生性修复，固定为主目录，不再暴露为设置 |
 
 ### ⏳ 待定（开工前需要）
-1. ⏳ Apple Developer 账号：用户确认将申请（$99/年）；账号到位前先发未签名 DMG。**M1 开工时并行提交申请**；
+1. ✅ Apple Developer Program：已加入。M4（签名 + 公证 + DMG + Release 自动化）不再被阻塞，开工前需要确认的只有两样：钥匙串里是否已装 **Developer ID Application** 证书，以及 Team ID；
 2. ✅ 仓库名：`deepseek-harness-desktop-for-macos`（与本地目录名一致，见上表"仓库名 vs 产品名"）。
 
 ---

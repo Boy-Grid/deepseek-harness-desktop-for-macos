@@ -18,12 +18,12 @@ jobs:
     # bundle. There is nothing meaningful to check on another platform.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The suite needs node for its stand-in servers: fixtures/fake-dsh.mjs and
       # fixtures/fake-mfw.mjs replace a real DeepSeek Harness install, so the boot
       # path is exercised without pulling ~150 packages of a dev-preview CLI.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -42,7 +42,7 @@ jobs:
     name: Build the app bundle
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build
         run: ./build.sh --output "$RUNNER_TEMP/DSH Desktop.app"

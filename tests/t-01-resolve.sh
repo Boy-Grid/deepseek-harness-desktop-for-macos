@@ -94,6 +94,24 @@ fi
 kill_tree "$parent" KILL 2>/dev/null
 wait 2>/dev/null
 
+# --- pnpm_locate ------------------------------------------------------------
+# The mfw backend refuses to boot without a package manager. The end-to-end
+# version of this case (t-03) can only run on a machine that has neither pnpm
+# nor corepack anywhere on the fallback PATH -- which is nowhere with node
+# installed, so it is always skipped. Unit-test the decision itself instead.
+mkdir -p "$TMP/haspm" "$TMP/nopm"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/haspm/pnpm"; chmod +x "$TMP/haspm/pnpm"
+assert_eq "$TMP/haspm/pnpm" "$(pnpm_locate "$TMP/haspm")" "pnpm_locate 找到 PATH 上的 pnpm"
+assert_eq "" "$(pnpm_locate "$TMP/nopm")" "目录里没有包管理器时返回空"
+
+# corepack counts as a fallback when pnpm itself is absent.
+printf '#!/bin/sh\nexit 0\n' > "$TMP/nopm/corepack"; chmod +x "$TMP/nopm/corepack"
+assert_eq "$TMP/nopm/corepack" "$(pnpm_locate "$TMP/nopm")" "没有 pnpm 时回退到 corepack"
+
+# pnpm wins over corepack when both are reachable.
+printf '#!/bin/sh\nexit 0\n' > "$TMP/nopm/pnpm"; chmod +x "$TMP/nopm/pnpm"
+assert_eq "$TMP/nopm/pnpm" "$(pnpm_locate "$TMP/nopm")" "两者都在时优先 pnpm"
+
 # --- port_listener degrades quietly when lsof is unavailable ---------------
 LSOF="$TMP/no-such-lsof"
 assert_eq "" "$(port_listener)" "lsof 不可用时 port_listener 返回空而不是报错"

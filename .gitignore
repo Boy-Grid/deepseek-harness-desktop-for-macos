@@ -1,0 +1,12 @@
+.build-cache/
+.DS_Store
+
+# Build output: the assembled bundle, disk images and release assets.
+*.app/
+*.dmg
+/dist/
+/build/
+SHA256SUMS
+
+# Local IDE state (Kiro), including machine-specific MCP configuration.
+.kiro/

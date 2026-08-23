@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test the launcher
+    # macOS only: the launcher leans on lsof, codesign-adjacent layout and the
+    # "Application Support" state directory, and the app it drives is a Cocoa
+    # bundle. There is nothing meaningful to check on another platform.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite needs node for its stand-in servers: fixtures/fake-dsh.mjs and
+      # fixtures/fake-mfw.mjs replace a real DeepSeek Harness install, so the boot
+      # path is exercised without pulling ~150 packages of a dev-preview CLI.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      # t-05 asserts shellcheck is clean, that no unbraced variable sits against a
+      # multibyte character (bash folds the byte into the name and set -u aborts),
+      # and that the M0 identity decisions in Info.plist are still in place.
+      # run.sh repeats every skipped case in its summary, so a case that could not
+      # run on the runner is visible instead of reading as a pass.
+      - name: Tests
+        run: bash tests/run.sh
+
+  build:
+    name: Build the app bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: ./build.sh --output "$RUNNER_TEMP/DSH Desktop.app"
+
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/DSH Desktop.app"
+          test -x "$APP/Contents/MacOS/LauncherAgent"
+          test -x "$APP/Contents/MacOS/launcher"
+          test -f "$APP/Contents/Info.plist"
+
+          # The launcher must be shipped verbatim; a stale copy inside the bundle
+          # is invisible until someone double-clicks the app.
+          diff -q launcher "$APP/Contents/MacOS/launcher"
+
+          plutil -lint "$APP/Contents/Info.plist"
+          get() { /usr/libexec/PlistBuddy -c "Print :$1" "$APP/Contents/Info.plist"; }
+          test "$(get CFBundleIdentifier)" = "io.github.boy-grid.dsh-desktop"
+          test "$(get CFBundleName)" = "DSH Desktop"
+
+          # Ad-hoc signature until a Developer ID is in place (see OPENSOURCE-PLAN
+          # M4); it still has to be a valid one, or Gatekeeper rejects the bundle
+          # outright rather than merely warning about the unknown developer.
+          codesign --verify --strict --verbose=2 "$APP"
+
+      - name: Rebuilding must be a no-op for the module cache
+        run: |
+          # The cache records the path it was built under and is wiped when that
+          # changes; a second build in place must not trigger that.
+          ./build.sh --output "$RUNNER_TEMP/DSH Desktop.app" 2>&1 | tee second.log
+          if grep -q 'clearing' second.log; then
+            echo "module cache was cleared on a rebuild in the same directory" >&2
+            exit 1
+          fi

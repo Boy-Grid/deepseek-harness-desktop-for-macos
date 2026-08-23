@@ -1,0 +1,738 @@
+#!/bin/bash
+# =============================================================================
+# DSH Desktop for macOS
+#
+# Boot / stop the DeepSeek Harness Web UI ("dsh --profile web") and open it in
+# the browser.  Safe by design: it only ever kills processes it started itself
+# (recorded in its state dir); a port already served by somebody else is never
+# touched.
+#
+# The GUI entry point is the native LauncherAgent (Contents/MacOS/LauncherAgent),
+# which keeps a Dock icon alive and calls this script for start/stop/status.
+#
+# Two backends serve the same UI:
+#   stock  the user's own dsh install                (default)
+#   mfw    dsh-mfw, which boots a patched dsh with multi-folder workspaces
+#          <https://github.com/Boy-Grid/dsh-multi-folder-workspace>
+# The mfw backend widens what an agent may write (every member folder of a
+# workspace), so it is never the default and never silently selected.
+#
+# Usage:
+#   launcher                     launch (start if needed, open browser)
+#   launcher launch              same as above
+#   launcher start               start the web UI if it is not already up
+#   launcher stop                stop the web UI started by this launcher
+#   launcher restart             stop + start
+#   launcher status              show whether the UI is up and who owns it
+#   launcher open                open the UI in the default browser
+#   launcher help                show this message
+#
+# Options (also settable via environment):
+#   --port <n>                   listen port            (DSH_LAUNCHER_PORT, default 3080)
+#   --backend <stock|mfw>        which dsh to boot      (DSH_LAUNCHER_BACKEND, default stock)
+#   --dsh <path>                 dsh binary to use      (DSH_LAUNCHER_DSH)
+#   --mfw <path>                 dsh-mfw entry to use   (DSH_LAUNCHER_MFW)
+#   --node <path>                node binary to use     (DSH_LAUNCHER_NODE)
+#   --dsh-home <dir>             DSH_HOME for the child (DSH_LAUNCHER_DSH_HOME)
+#   --allow-version-skew         boot mfw even if its baseline differs from the
+#                                installed dsh          (DSH_LAUNCHER_ALLOW_VERSION_SKEW=1)
+#   --no-browser                 do not open a browser  (DSH_LAUNCHER_NO_BROWSER=1)
+#   --state <dir>                state directory        (DSH_LAUNCHER_STATE)
+#
+# State lives in "$HOME/Library/Application Support/DSH Desktop"
+# unless DSH_LAUNCHER_STATE overrides it: web.pid (the PID we started), dsh-path
+# (cached dsh binary location) and logs/web.log.  It is partitioned per backend
+# and per port -- a non-stock backend adds a .../<backend> level and a
+# non-default port a .../ports/<port> one -- so instances never share a pid file
+# or a log with a differently-booted one.
+# =============================================================================
+
+set -u
+
+PROG="DSH Desktop"
+HOST="127.0.0.1"
+PORT="${DSH_LAUNCHER_PORT:-3080}"
+BACKEND="${DSH_LAUNCHER_BACKEND:-stock}"
+NO_BROWSER="${DSH_LAUNCHER_NO_BROWSER:-0}"
+DSH_BIN_OVERRIDE="${DSH_LAUNCHER_DSH:-}"
+MFW_BIN_OVERRIDE="${DSH_LAUNCHER_MFW:-}"
+NODE_BIN_OVERRIDE="${DSH_LAUNCHER_NODE:-}"
+DSH_HOME_OVERRIDE="${DSH_LAUNCHER_DSH_HOME:-}"
+ALLOW_SKEW="${DSH_LAUNCHER_ALLOW_VERSION_SKEW:-0}"
+START_TIMEOUT=60      # seconds to wait for the UI to answer
+STOP_TIMEOUT=20       # seconds to wait for the port to close
+PROVISION_TIMEOUT=900 # seconds to wait for a first-run mfw runtime (installs ~300 MB)
+MFW_MIN_NODE=22       # dsh-mfw declares engines.node >= 22
+
+if [ -n "${DSH_LAUNCHER_STATE:-}" ]; then
+    STATE_DIR="$DSH_LAUNCHER_STATE"
+    STATE_EXPLICIT=1
+else
+    STATE_DIR="$HOME/Library/Application Support/DSH Desktop"
+    STATE_EXPLICIT=0
+fi
+
+# ---------------------------------------------------------------------------
+# argument parsing
+# ---------------------------------------------------------------------------
+CMD="launch"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        start|stop|restart|status|open|launch|help) CMD="$1"; shift ;;
+        --port)    [ $# -ge 2 ] && PORT="${2}"; shift 2 ;;
+        --port=*)  PORT="${1#*=}"; shift ;;
+        --backend)   [ $# -ge 2 ] && BACKEND="${2}"; shift 2 ;;
+        --backend=*) BACKEND="${1#*=}"; shift ;;
+        --dsh)     [ $# -ge 2 ] && DSH_BIN_OVERRIDE="${2}"; shift 2 ;;
+        --dsh=*)   DSH_BIN_OVERRIDE="${1#*=}"; shift ;;
+        --mfw)     [ $# -ge 2 ] && MFW_BIN_OVERRIDE="${2}"; shift 2 ;;
+        --mfw=*)   MFW_BIN_OVERRIDE="${1#*=}"; shift ;;
+        --node)    [ $# -ge 2 ] && NODE_BIN_OVERRIDE="${2}"; shift 2 ;;
+        --node=*)  NODE_BIN_OVERRIDE="${1#*=}"; shift ;;
+        --dsh-home)   [ $# -ge 2 ] && DSH_HOME_OVERRIDE="${2}"; shift 2 ;;
+        --dsh-home=*) DSH_HOME_OVERRIDE="${1#*=}"; shift ;;
+        --allow-version-skew) ALLOW_SKEW=1; shift ;;
+        --state)   [ $# -ge 2 ] && STATE_DIR="${2}" && STATE_EXPLICIT=1; shift 2 ;;
+        --state=*) STATE_DIR="${1#*=}"; STATE_EXPLICIT=1; shift ;;
+        --no-browser) NO_BROWSER=1; shift ;;
+        -h|--help) CMD="help"; shift ;;
+        *) echo "$PROG: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+case "$BACKEND" in
+    stock|mfw) ;;
+    *) echo "$PROG: unknown backend: $BACKEND (expected 'stock' or 'mfw')" >&2; exit 2 ;;
+esac
+URL="http://${HOST}:${PORT}"
+# State is partitioned so that two differently-booted instances can never read
+# each other's pid file: a non-stock backend adds its own level, a non-default
+# port adds another.  stock+3080 keeps the historical path untouched, so an
+# existing install keeps its cached paths and logs.
+if [ "$STATE_EXPLICIT" -eq 0 ]; then
+    STATE_DIR="$HOME/Library/Application Support/DSH Desktop"
+    [ "$BACKEND" = "stock" ] || STATE_DIR="$STATE_DIR/$BACKEND"
+    [ "$PORT" = "3080" ] || STATE_DIR="$STATE_DIR/ports/$PORT"
+fi
+LOG_DIR="$STATE_DIR/logs"
+WEB_LOG="$LOG_DIR/web.log"
+PID_FILE="$STATE_DIR/web.pid"
+DSH_CACHE="$STATE_DIR/dsh-path"
+MFW_CACHE="$STATE_DIR/mfw-path"
+NODE_CACHE="$STATE_DIR/node-path"
+ERR_MSG=""
+
+# The home a plain `dsh` would use, and the one we will actually hand to the
+# child.  They differ only when --dsh-home points somewhere else, which is the
+# documented way out of a baseline mismatch (see version_skew_guard).
+SHARED_DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+if [ -n "$DSH_HOME_OVERRIDE" ]; then
+    EFFECTIVE_DSH_HOME="$DSH_HOME_OVERRIDE"
+else
+    EFFECTIVE_DSH_HOME="$SHARED_DSH_HOME"
+fi
+if [ "$EFFECTIVE_DSH_HOME" = "$SHARED_DSH_HOME" ]; then
+    DSH_HOME_ISOLATED=0
+else
+    DSH_HOME_ISOLATED=1
+fi
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+ensure_state() {
+    mkdir -p "$LOG_DIR" || {
+        echo "$PROG: cannot create state dir: $STATE_DIR" >&2
+        exit 1
+    }
+}
+
+url_up() {
+    curl -s -o /dev/null --max-time 2 "$URL" 2>/dev/null
+}
+
+# lsof lives in /usr/sbin, which a stripped PATH (cron, CI, an agent shell) may
+# not carry.  Resolve it once by absolute path: without it the ownership check
+# below degrades, and it degrades in the wrong direction -- silently reporting
+# our own server as somebody else's.
+LSOF=$(command -v lsof 2>/dev/null || true)
+[ -n "$LSOF" ] || LSOF=/usr/sbin/lsof
+
+# The pid listening on our port, or empty if that cannot be determined.
+port_listener() {
+    [ -x "$LSOF" ] || return 0
+    "$LSOF" -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1
+}
+
+pid_alive() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+# Kill a process and its whole descendant tree, gently first.
+kill_tree() {
+    local pid="$1" sig="${2:-TERM}"
+    local children
+    children=$(pgrep -P "$pid" 2>/dev/null)
+    for c in $children; do
+        kill_tree "$c" "$sig"
+    done
+    kill -s "$sig" "$pid" 2>/dev/null
+}
+
+# A pid plus every descendant, breadth-first.  Walking only the first child of
+# each level (the old shortcut) misses the listener as soon as any level has
+# siblings -- and with the mfw backend the tree is one level deeper, because
+# dsh-mfw stays alive as the parent of the dsh it spawns.
+proc_tree() {
+    local queue="$1" out="" depth=0 next p kids
+    while [ -n "$queue" ] && [ "$depth" -lt 32 ]; do
+        next=""
+        for p in $queue; do
+            out="$out $p"
+            kids=$(pgrep -P "$p" 2>/dev/null)
+            [ -n "$kids" ] && next="$next $kids"
+        done
+        queue="$next"
+        depth=$((depth + 1))
+    done
+    echo "$out"
+}
+
+# Resolve a path through its symlinks without depending on GNU readlink -f
+# (BSD readlink has no -f, and macOS ships no realpath by default).
+# Call it through command substitution only: it walks with cd, so it must run in
+# a subshell to leave the caller's working directory alone.
+realpath_of() {
+    local target="$1" dir base link hops=0
+    [ -n "$target" ] || return 1
+    dir=$(dirname "$target")
+    base=$(basename "$target")
+    cd "$dir" 2>/dev/null || return 1
+    # A relative link target resolves against the directory of the link itself,
+    # and we are already standing in it -- so absolute and relative targets take
+    # the same two steps.
+    while [ -L "$base" ] && [ "$hops" -lt 40 ]; do
+        link=$(readlink "$base") || return 1
+        dir=$(dirname "$link")
+        base=$(basename "$link")
+        cd "$dir" 2>/dev/null || return 1
+        hops=$((hops + 1))
+    done
+    echo "$(pwd -P)/$base"
+}
+
+# Major version of a node binary, or empty if it cannot be asked.
+node_major() {
+    local v
+    v=$("$1" --version 2>/dev/null) || return 1
+    v="${v#v}"
+    echo "${v%%.*}"
+}
+
+# "version" out of a package.json, without needing a JSON parser.
+pkg_version() {
+    [ -f "$1" ] || return 1
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -1
+}
+
+# The PATH handed to the child.  This must contain a usable pnpm for the mfw
+# backend, and pnpm/corepack live next to the *real* node -- a symlink farm like
+# ~/.local/bin usually carries node/npm/npx only.  Measured: injecting the
+# symlink's directory makes dsh-mfw fail with "cannot find a usable pnpm" even
+# when its runtime tree is already provisioned, because it resolves pnpm before
+# it looks at the tree.
+child_path() {
+    local node_bin="$1" real dirs
+    dirs="$(dirname "$node_bin")"
+    real=$(realpath_of "$node_bin" 2>/dev/null)
+    if [ -n "$real" ] && [ "$(dirname "$real")" != "$dirs" ]; then
+        dirs="$(dirname "$real"):$dirs"
+    fi
+    echo "$dirs:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+}
+
+# ---------------------------------------------------------------------------
+# dsh binary resolution (PATH is unreliable for GUI-launched processes)
+# ---------------------------------------------------------------------------
+# The entry is always run as `node <entry>`, never executed directly, so a
+# readable file is the real requirement -- demanding the executable bit would
+# reject a perfectly usable path like .../@deepseek-ai/dsh/lib/bin.js, which is
+# also what --mfw accepts.
+resolve_dsh() {
+    if [ -n "$DSH_BIN_OVERRIDE" ]; then
+        [ -f "$DSH_BIN_OVERRIDE" ] || { echo "$PROG: --dsh entry not found: $DSH_BIN_OVERRIDE" >&2; return 1; }
+        echo "$DSH_BIN_OVERRIDE"; return 0
+    fi
+    if [ -f "$DSH_CACHE" ]; then
+        local cached; cached=$(cat "$DSH_CACHE" 2>/dev/null)
+        if [ -n "$cached" ] && [ -f "$cached" ]; then
+            echo "$cached"; return 0
+        fi
+    fi
+    # augment PATH for common non-login-shell locations (PATH entries are not
+    # globbed, so the npx cache has to be probed separately, below)
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+    local found
+    found=$(command -v dsh 2>/dev/null)
+    if [ -z "$found" ]; then
+        found=$(ls -t "$HOME"/.npm/_npx/*/node_modules/.bin/dsh 2>/dev/null | head -1)
+    fi
+    if [ -z "$found" ]; then
+        echo "$PROG: cannot find the 'dsh' CLI. Install it with:  npm install -g @deepseek-ai/dsh" >&2
+        echo "      or pass --dsh <path>" >&2
+        return 1
+    fi
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    echo "$found" > "$DSH_CACHE" 2>/dev/null
+    echo "$found"; return 0
+}
+
+# ---------------------------------------------------------------------------
+# dsh-mfw resolution and its two guards
+# ---------------------------------------------------------------------------
+resolve_mfw() {
+    if [ -n "$MFW_BIN_OVERRIDE" ]; then
+        [ -f "$MFW_BIN_OVERRIDE" ] || { echo "$PROG: --mfw entry not found: $MFW_BIN_OVERRIDE" >&2; return 1; }
+        echo "$MFW_BIN_OVERRIDE"; return 0
+    fi
+    if [ -f "$MFW_CACHE" ]; then
+        local cached; cached=$(cat "$MFW_CACHE" 2>/dev/null)
+        if [ -n "$cached" ] && [ -f "$cached" ]; then
+            echo "$cached"; return 0
+        fi
+    fi
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+    local found
+    found=$(command -v dsh-mfw 2>/dev/null)
+    if [ -z "$found" ]; then
+        found=$(ls -t "$HOME"/.npm/_npx/*/node_modules/@boy_grid/dsh-mfw/lib/bin.js 2>/dev/null | head -1)
+    fi
+    if [ -z "$found" ]; then
+        echo "$PROG: cannot find 'dsh-mfw'. Install it with:  npm install -g @boy_grid/dsh-mfw" >&2
+        echo "      or pass --mfw <path to its lib/bin.js>" >&2
+        return 1
+    fi
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    echo "$found" > "$MFW_CACHE" 2>/dev/null
+    echo "$found"; return 0
+}
+
+# The dsh version dsh-mfw pins its patch set to.  Its own package.json carries
+# it under "dshMfw", which is also what its manifest reads.
+mfw_baseline() {
+    local entry="$1" real pkg
+    real=$(realpath_of "$entry" 2>/dev/null) || return 1
+    # <pkg root>/lib/bin.js -> <pkg root>/package.json
+    pkg="$(dirname "$(dirname "$real")")/package.json"
+    [ -f "$pkg" ] || return 1
+    sed -n 's/.*"baseVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg" | head -1
+}
+
+# The version of the dsh the user has installed, if one is resolvable at all.
+installed_dsh_version() {
+    local bin real pkg
+    bin=$(resolve_dsh 2>/dev/null) || return 1
+    real=$(realpath_of "$bin" 2>/dev/null) || return 1
+    pkg="$(dirname "$(dirname "$real")")/package.json"
+    pkg_version "$pkg"
+}
+
+# dsh-mfw pins an exact dsh baseline, because upstream packages reference each
+# other with "^" ranges and would otherwise drift onto a newer prerelease and
+# leave the patches unused.  The consequence for us: a *newer* stock dsh may
+# already have written $DSH_HOME in a shape the pinned baseline does not know,
+# and the reverse direction is destructive too -- stock dsh drops the extra
+# member list the first time it rewrites a workspace record.
+#
+# So when the two versions have drifted apart, refuse to boot mfw against the
+# home that stock dsh also uses, and name the two ways out.
+version_skew_guard() {
+    local mfw_entry="$1" baseline installed
+    [ "$ALLOW_SKEW" = "1" ] && return 0
+    [ "$DSH_HOME_ISOLATED" -eq 1 ] && return 0
+
+    baseline=$(mfw_baseline "$mfw_entry" 2>/dev/null)
+    installed=$(installed_dsh_version 2>/dev/null)
+    # Nothing to compare: no stock dsh installed, or an unreadable manifest.
+    # Do not invent a mismatch out of missing information.
+    [ -n "$baseline" ] && [ -n "$installed" ] || return 0
+    [ "$baseline" = "$installed" ] && return 0
+
+    # Braces are required, not cosmetic: in a UTF-8 locale bash absorbs the
+    # following multibyte character into the variable name and dies with
+    # "unbound variable" under set -u.
+    ERR_MSG="dsh-mfw 的基线是 ${baseline}，而已安装的 dsh 是 ${installed}。
+两者已错开，不能在同一个 DSH home（${EFFECTIVE_DSH_HOME}）下切到 mfw：
+更新的 dsh 可能已把记录写成新格式，而 mfw 固定在旧基线；反向也会丢成员列表。
+出路：① 用独立的 home —— --dsh-home <目录>；② 等 dsh-mfw 把补丁集 rebase 到 ${installed}。
+确知无碍时可用 --allow-version-skew 跳过本检查。"
+    echo "$PROG: $ERR_MSG" >&2
+    return 1
+}
+
+# Node.js binary resolution.  The dsh shim is `#!/usr/bin/env node`, but the
+# GUI (double-click) environment has a minimal PATH that rarely contains node
+# (nvm / ~/.local / volta installs live outside system PATH) — so we resolve
+# node explicitly and run the dsh entry with it directly.
+resolve_node() {
+    if [ -n "$NODE_BIN_OVERRIDE" ]; then
+        [ -x "$NODE_BIN_OVERRIDE" ] || { echo "$PROG: --node binary not executable: $NODE_BIN_OVERRIDE" >&2; return 1; }
+        echo "$NODE_BIN_OVERRIDE"; return 0
+    fi
+    if [ -f "$NODE_CACHE" ]; then
+        local cached; cached=$(cat "$NODE_CACHE" 2>/dev/null)
+        if [ -n "$cached" ] && [ -x "$cached" ]; then
+            echo "$cached"; return 0
+        fi
+    fi
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+    local found
+    found=$(command -v node 2>/dev/null)
+    if [ -z "$found" ]; then
+        found=$(ls -t "$HOME"/.nvm/versions/node/*/bin/node \
+                    "$HOME"/.volta/bin/node \
+                    "$HOME"/.fnm/*/bin/node \
+                    "$HOME"/.local/bin/node \
+                    /opt/homebrew/bin/node \
+                    /usr/local/bin/node 2>/dev/null | head -1)
+    fi
+    if [ -z "$found" ]; then
+        echo "$PROG: cannot find a Node.js runtime. Install Node.js or pass --node <path>" >&2
+        return 1
+    fi
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    echo "$found" > "$NODE_CACHE" 2>/dev/null
+    echo "$found"; return 0
+}
+
+# ---------------------------------------------------------------------------
+# core actions
+# ---------------------------------------------------------------------------
+# Does the process listening on our port belong to the recorded pid?
+# Echoes 1 (ours), 0 (somebody else's) or -1 (cannot tell).  The recorded pid may
+# only be an ancestor of the listener -- always so with the mfw backend, where
+# dsh-mfw stays alive as the parent of the dsh it spawned -- so the whole subtree
+# counts, not just the pid itself.
+port_ownership() {
+    local pid="$1" owner
+    owner=$(port_listener)
+    if [ -z "$owner" ]; then echo -1; return 0; fi
+    case " $(proc_tree "$pid") " in
+        *" $owner "*) echo 1 ;;
+        *) echo 0 ;;
+    esac
+}
+
+# A weak sanity check for the case where ownership cannot be established: does
+# the recorded pid at least look like something we would have started?  It
+# guards against pid reuse -- a state dir outlives a crash or a reboot, and the
+# number in it may by then belong to an unrelated process.
+pid_looks_like_ours() {
+    local cmd
+    cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
+    case "$cmd" in
+        *dsh*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+status_of() {
+    # managed: -1 undetermined, 0 someone else's, 1 ours
+    local up=0 pid="" managed=0
+    if url_up; then
+        up=1
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE" 2>/dev/null)
+            if pid_alive "$pid"; then
+                managed=$(port_ownership "$pid")
+            fi
+        fi
+    fi
+    echo "status:  $( [ "$up" -eq 1 ] && echo running || echo stopped )"
+    echo "backend: $BACKEND"
+    echo "port:    $PORT"
+    echo "url:     $URL"
+    echo "home:    $EFFECTIVE_DSH_HOME$( [ "$DSH_HOME_ISOLATED" -eq 1 ] && echo "  (isolated)" )"
+    echo "state:   $STATE_DIR"
+    if [ "$up" -eq 1 ]; then
+        case "$managed" in
+            1)  echo "owner:   this launcher (pid $pid)" ;;
+            -1) echo "owner:   undetermined (recorded pid $pid is alive, but lsof is unavailable)" ;;
+            *)  echo "owner:   another process (pid $(port_listener)) — launcher will not touch it" ;;
+        esac
+    fi
+    [ "$up" -eq 1 ]
+}
+
+# Record a start failure the same way everywhere: state it in the log the user
+# is pointed at, and on stderr for whoever called us.
+start_fail() {
+    ERR_MSG="$1"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] launcher: $ERR_MSG" >>"$WEB_LOG"
+    echo "$PROG: $ERR_MSG" >&2
+    return 1
+}
+
+# Where the child would find a package manager for dsh-mfw, if anywhere.  It
+# looks for pnpm first and falls back to corepack, and resolves one before it
+# even looks at its runtime tree -- so this has to hold on every boot, not just
+# the first.  Echoing the hit (rather than a yes/no) puts it in the log, which is
+# the only place a user can see whether the PATH we built actually worked.
+pnpm_locate() {
+    ( export PATH="$1"
+      command -v pnpm 2>/dev/null || command -v corepack 2>/dev/null )
+}
+
+# Prepare the patched runtime and the mfw profile before booting.  Kept separate
+# from the boot because the first run installs a ~300 MB tree: that does not fit
+# in START_TIMEOUT, and a first-run user deserves to see it happen rather than a
+# silent timeout.  A warm run costs about 0.2 s, so this is unconditional.
+provision_mfw() {
+    local node_bin="$1" mfw_entry="$2" path="$3"
+    local rc_file="$STATE_DIR/provision.rc" pid waited=0 rc
+    rm -f "$rc_file"
+    log "preparing the mfw runtime (first run installs ~300 MB, then it is reused)"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] launcher: dsh-mfw provision" >>"$WEB_LOG"
+    (
+        env "PATH=$path" "DSH_HOME=$EFFECTIVE_DSH_HOME" \
+            "$node_bin" "$mfw_entry" provision >>"$WEB_LOG" 2>&1
+        echo $? > "$rc_file"
+    ) &
+    pid=$!
+    while [ "$waited" -lt "$PROVISION_TIMEOUT" ]; do
+        if [ -f "$rc_file" ]; then
+            rc=$(cat "$rc_file" 2>/dev/null)
+            rm -f "$rc_file"
+            [ "$rc" = "0" ] && return 0
+            start_fail "dsh-mfw 准备运行时失败（退出码 ${rc}）。日志末尾：
+$(tail -n 6 "$WEB_LOG" 2>/dev/null)"
+            return 1
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    kill_tree "$pid" TERM
+    start_fail "dsh-mfw 准备运行时超时（${PROVISION_TIMEOUT}s）。首次安装需要联网，详见日志：$WEB_LOG"
+    return 1
+}
+
+start_server() {
+    ensure_state   # log dir must exist before anything can fail
+    if url_up; then
+        # Something already answers on this port.  "Nothing to start" is only
+        # true when that something is OURS -- i.e. recorded in this backend's
+        # state dir.  Reporting success for a server booted by a different
+        # backend (or by anyone else) is how a backend switch silently does
+        # nothing: the caller stops the old instance under the new backend, that
+        # stop is refused, and this then blesses the survivor.
+        local recorded=""
+        [ -f "$PID_FILE" ] && recorded=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$recorded" ] && pid_alive "$recorded" && [ "$(port_ownership "$recorded")" != "0" ]; then
+            log "web UI already responding on $URL — nothing to start"
+            return 0
+        fi
+        start_fail "端口 ${PORT} 上已有服务，但不是本后端（${BACKEND}）启动的。
+先停掉它再来，或者换一个端口。"
+        return 1
+    fi
+    local node_bin child_pathv entry major
+    local args=()
+
+    if ! node_bin=$(resolve_node); then
+        start_fail "找不到 Node.js 运行时。请安装 Node.js 或用 --node 指定路径"
+        return 1
+    fi
+    # pnpm and corepack live next to the *real* node, so the child's PATH is
+    # built from the resolved symlink target, not from where the symlink sits.
+    child_pathv=$(child_path "$node_bin")
+    major=$(node_major "$node_bin" 2>/dev/null)
+
+    if [ "$BACKEND" = "mfw" ]; then
+        if ! entry=$(resolve_mfw); then
+            start_fail "找不到 dsh-mfw。请先运行 npm install -g @boy_grid/dsh-mfw，或用 --mfw 指定 lib/bin.js"
+            return 1
+        fi
+        version_skew_guard "$entry" || return 1
+        # dsh-mfw boots dsh with spawn(process.execPath), so the node we pick
+        # here is also the node dsh runs on -- and it declares node >= 22.
+        if [ -n "$major" ] && [ "$major" -lt "$MFW_MIN_NODE" ]; then
+            start_fail "dsh-mfw 需要 Node.js >= ${MFW_MIN_NODE}，当前是 v${major}（${node_bin}）。请升级 Node.js 或用 --node 指定一个更新的"
+            return 1
+        fi
+        local pm; pm=$(pnpm_locate "$child_pathv")
+        if [ -z "$pm" ]; then
+            start_fail "dsh-mfw 需要 pnpm（或 corepack）来准备运行时，但在 $(dirname "$node_bin") 及常规目录里都找不到。
+它们通常与 node 装在同一目录：可以跑一次 corepack enable，或装 pnpm 11+，或用 --node 指向真正的 node 可执行文件"
+            return 1
+        fi
+        log "package manager for mfw: $pm"
+        provision_mfw "$node_bin" "$entry" "$child_pathv" || return 1
+        # No --profile here: dsh-mfw supplies its own (--profile mfw plus its
+        # patch overlay) and a second one would collide.
+        args=(web --host "$HOST" --port "$PORT" --no-open)
+    else
+        if ! entry=$(resolve_dsh); then
+            start_fail "找不到 dsh CLI。请先运行 npm install -g @deepseek-ai/dsh，或用 --dsh 指定路径"
+            return 1
+        fi
+        args=(--profile web --host "$HOST" --port "$PORT" --no-open)
+    fi
+
+    # `--no-open` belongs to the web app, not to the dsh CLI — dsh declares
+    # allowUnknownOption()/passThroughOptions() and forwards it to the booted
+    # profile's app, where openBrowser defaults to true.  Without it dsh hands
+    # the URL to the default browser and the user gets a duplicate of the page
+    # this app is about to show in its own window.  The mfw backend forwards it
+    # the same way.
+    log "starting [$BACKEND]: $node_bin $entry ${args[*]}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] launcher: starting $BACKEND on $URL (DSH_HOME=$EFFECTIVE_DSH_HOME)" >>"$WEB_LOG"
+    nohup env "PATH=$child_pathv" "DSH_HOME=$EFFECTIVE_DSH_HOME" \
+        "$node_bin" "$entry" "${args[@]}" >>"$WEB_LOG" 2>&1 &
+    echo $! > "$PID_FILE"
+    local pid; pid=$(cat "$PID_FILE")
+    local waited=0
+    while [ "$waited" -lt "$START_TIMEOUT" ]; do
+        if url_up; then
+            log "web UI is up on $URL (pid $pid)"
+            return 0
+        fi
+        if ! pid_alive "$pid"; then
+            local tail_out; tail_out=$(tail -n 6 "$WEB_LOG" 2>/dev/null)
+            ERR_MSG="dsh 进程启动后立即退出。日志末尾：$tail_out"
+            log "server process exited early — last log lines:" >&2
+            echo "$tail_out" >&2
+            return 1
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    ERR_MSG="等待 $URL 就绪超时（${START_TIMEOUT}s），详见日志"
+    log "timed out after ${START_TIMEOUT}s waiting for $URL" >&2
+    return 1
+}
+
+stop_server() {
+    if ! url_up; then
+        log "nothing is serving $URL — nothing to stop"
+        rm -f "$PID_FILE"
+        return 0
+    fi
+    if [ ! -f "$PID_FILE" ]; then
+        log "a server is running on $PORT but this launcher did not start it — refusing to stop it" >&2
+        return 1
+    fi
+    local pid; pid=$(cat "$PID_FILE")
+    if ! pid_alive "$pid"; then
+        log "recorded pid $pid is gone; the port is owned by someone else — refusing to stop it" >&2
+        return 1
+    fi
+    # A live recorded pid is not enough to start signalling.  Two ways it can be
+    # the wrong process: the port was taken over by something else while our
+    # process still runs, or the state dir outlived a reboot and the number now
+    # belongs to an unrelated process (pid reuse).  Check before killing.
+    local own; own=$(port_ownership "$pid")
+    if [ "$own" = "0" ]; then
+        log "pid $pid is alive but $URL is served by $(port_listener), which is not in its process tree — refusing to stop anything" >&2
+        return 1
+    fi
+    if [ "$own" = "-1" ] && ! pid_looks_like_ours "$pid"; then
+        log "cannot confirm ownership of $URL (lsof unavailable) and pid $pid does not look like a dsh we started — refusing to stop it" >&2
+        return 1
+    fi
+    log "stopping pid $pid (SIGTERM)"
+    kill_tree "$pid" TERM
+    local waited=0
+    # Wait for the port to close *and* the recorded process to be gone.  The
+    # port closing first is not the end of the teardown: dsh-mfw installs its own
+    # SIGTERM handler, which forwards the signal to the dsh it spawned instead of
+    # exiting, so the parent only goes away once that child has finished.
+    # Returning at "port closed" would report success over a tree still running
+    # and let a following restart race it.
+    while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
+        if ! url_up && ! pid_alive "$pid"; then
+            rm -f "$PID_FILE"
+            log "web UI stopped"
+            return 0
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    log "still up after $STOP_TIMEOUT s — escalating to SIGKILL"
+    kill_tree "$pid" KILL
+    sleep 1
+    if url_up; then
+        log "port $PORT still serving after SIGKILL — refusing to go further" >&2
+        return 1
+    fi
+    rm -f "$PID_FILE"
+    log "web UI stopped (forced)"
+    return 0
+}
+
+open_browser() {
+    if ! url_up; then
+        log "not opening browser: $URL is not responding" >&2
+        return 1
+    fi
+    if [ "$NO_BROWSER" -eq 1 ]; then
+        log "browser open skipped (--no-browser)"
+        return 0
+    fi
+    open "$URL"
+    log "opened $URL in the default browser"
+}
+
+do_launch() {
+    # CLI entry (start if needed, then open the browser). The GUI entry point
+    # is LauncherAgent; this stays for terminal/agent use.
+    if start_server; then
+        open_browser
+        return $?
+    else
+        osascript -e "display dialog \"DeepSeek Harness Web UI 启动失败。\n\n原因：${ERR_MSG}\n\n日志文件：$WEB_LOG\" with title \"$PROG\" buttons {\"好\"} default button 1" >/dev/null 2>&1
+        return 1
+    fi
+}
+
+do_help() {
+    # Print the header block between the two banner rules instead of a fixed
+    # line range, so editing the comment cannot silently truncate the help.
+    awk '
+        /^# =+$/ { rule++; next }
+        rule == 1 { sub(/^# ?/, ""); print }
+        rule >= 2 { exit }
+    ' "$0"
+}
+
+# ---------------------------------------------------------------------------
+# Sourced with DSH_LAUNCHER_LIB=1 the script defines its helpers and returns
+# without dispatching, so tests can exercise them one at a time instead of only
+# through a full start/stop.
+if [ "${DSH_LAUNCHER_LIB:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+case "$CMD" in
+    status)
+        status_of; exit $?
+        ;;
+    start)
+        start_server
+        ;;
+    stop)
+        stop_server
+        ;;
+    restart)
+        stop_server && start_server
+        ;;
+    open)
+        open_browser
+        ;;
+    launch)
+        do_launch
+        ;;
+    help)
+        do_help
+        ;;
+    *)
+        echo "$PROG: unknown command: $CMD" >&2; exit 2
+        ;;
+esac

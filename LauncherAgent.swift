@@ -1400,29 +1400,64 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                                    selectedVisual: selectedIndex.map { tabs.count - 1 - $0 })
     }
 
+    private static let emptyStateDiameter: CGFloat = 88
+    /// Purely visual. A symbol's pointSize tracks the cap height of text at the
+    /// same size, not the glyph's drawn height, so it does not carry over from
+    /// the 64pt "+" this replaced; this lands the plus at a bit under half the
+    /// circle's diameter, which is where a glyph in a round container reads as
+    /// balanced.
+    private static let emptyStatePlusSize: CGFloat = 44
+
     private func showEmptyState() {
         let v = NSView()
-        let btn = NSButton(title: "+", target: self, action: #selector(newTabTapped))
+        let diameter = Self.emptyStateDiameter
+
+        // The circle is drawn by CircleBackdropView rather than by a corner
+        // radius on the button's layer, for two reasons: it always inscribes a
+        // true circle in its bounds, and it re-fills in draw() so the colour
+        // follows a light/dark switch (a CGColor baked into a layer would not).
+        let circle = CircleBackdropView()
+        circle.color = NSColor.labelColor.withAlphaComponent(0.05)
+        circle.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(circle)
+
+        // An SF Symbol, not the character "+": a glyph is centred on its text
+        // line box, and that box reserves room for a descender the "+" does not
+        // have -- so the plus sits visibly above the centre of its button. The
+        // symbol image is optically centred in its own bounds, and this is what
+        // the tab strip's own "+" already uses.
+        let btn = NSButton()
+        btn.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新建标签页")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: Self.emptyStatePlusSize,
+                                                                 weight: .ultraLight))
+        btn.imagePosition = .imageOnly
+        btn.imageScaling = .scaleProportionallyDown
         btn.isBordered = false
-        btn.font = .systemFont(ofSize: 64, weight: .ultraLight)
         btn.contentTintColor = .tertiaryLabelColor
-        btn.wantsLayer = true
-        btn.layer?.cornerRadius = 44
-        btn.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+        btn.target = self
+        btn.action = #selector(newTabTapped)
         btn.translatesAutoresizingMaskIntoConstraints = false
         v.addSubview(btn)
+
         let label = NSTextField(labelWithString: "新建标签页，开始多会话工作")
         label.textColor = .tertiaryLabelColor
         label.font = .systemFont(ofSize: 13)
         label.translatesAutoresizingMaskIntoConstraints = false
         v.addSubview(label)
         NSLayoutConstraint.activate([
-            btn.centerXAnchor.constraint(equalTo: v.centerXAnchor),
-            btn.centerYAnchor.constraint(equalTo: v.centerYAnchor, constant: -18),
-            btn.widthAnchor.constraint(equalToConstant: 88),
-            btn.heightAnchor.constraint(equalToConstant: 88),
+            circle.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            circle.centerYAnchor.constraint(equalTo: v.centerYAnchor, constant: -18),
+            circle.widthAnchor.constraint(equalToConstant: diameter),
+            circle.heightAnchor.constraint(equalToConstant: diameter),
+            // The button shares the circle's frame exactly, so the symbol's
+            // centre and the circle's centre are the same point by construction
+            // rather than by a hand-tuned offset.
+            btn.centerXAnchor.constraint(equalTo: circle.centerXAnchor),
+            btn.centerYAnchor.constraint(equalTo: circle.centerYAnchor),
+            btn.widthAnchor.constraint(equalTo: circle.widthAnchor),
+            btn.heightAnchor.constraint(equalTo: circle.heightAnchor),
             label.centerXAnchor.constraint(equalTo: v.centerXAnchor),
-            label.topAnchor.constraint(equalTo: btn.bottomAnchor, constant: 10),
+            label.topAnchor.constraint(equalTo: circle.bottomAnchor, constant: 10),
         ])
         v.autoresizingMask = [.width, .height]
         v.frame = rootView.webContainer.bounds

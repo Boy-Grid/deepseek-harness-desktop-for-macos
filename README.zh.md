@@ -38,7 +38,21 @@
   ```
 - 仅多文件夹后端需要：Node.js 22+ 与 pnpm 11+（或 corepack）
 
-## 构建与安装
+## 安装
+
+从 [Releases](https://github.com/Boy-Grid/deepseek-harness-desktop-for-macos/releases)
+下载磁盘映像，打开后把应用拖进「应用程序」。映像带 Developer ID 签名并已公证，打开时
+不会被 Gatekeeper 拦。
+
+建议校验一下下载到的东西：
+
+```sh
+shasum -a 256 -c SHA256SUMS
+spctl --assess --type open --context context:primary-signature -v <dmg>
+# 期望：accepted / source=Notarized Developer ID
+```
+
+## 从源码构建
 
 ```sh
 git clone https://github.com/Boy-Grid/deepseek-harness-desktop-for-macos.git

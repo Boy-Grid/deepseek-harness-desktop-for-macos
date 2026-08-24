@@ -43,7 +43,22 @@ storage. This app makes the harness a normal desktop application:
   ```
 - For the multi-folder backend only: Node.js 22+ and pnpm 11+ (or corepack)
 
-## Build and install
+## Install
+
+Download the disk image from
+[Releases](https://github.com/Boy-Grid/deepseek-harness-desktop-for-macos/releases),
+open it and drag the app to Applications. The image is signed with a Developer ID
+and notarized, so it opens without a Gatekeeper warning.
+
+Worth verifying what you downloaded:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+spctl --assess --type open --context context:primary-signature -v <dmg>
+# expected: accepted / source=Notarized Developer ID
+```
+
+## Build from source
 
 ```sh
 git clone https://github.com/Boy-Grid/deepseek-harness-desktop-for-macos.git

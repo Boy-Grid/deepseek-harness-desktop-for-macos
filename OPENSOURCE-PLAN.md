@@ -221,7 +221,7 @@ deepseek-harness-desktop-for-macos/
 ├── SECURITY.md              # ✅ 报告流程 + 安全模型（进程归属、写面、签名状态、本地数据）
 ├── Resources-README.md      # ✅ 打进 bundle 的简版说明
 ├── CODE_OF_CONDUCT.md       # ⏳
-├── CHANGELOG.md             # ⏳ semver
+├── CHANGELOG.md             # ✅ semver
 ├── main.swift               # ✅ 入口（顶层语句只能在这里）
 ├── LauncherAgent.swift      # ⏳ 仍是单文件 GUI 主体，继续拆分见 M3 剩余项
 ├── Preferences.swift        # ✅ 设置模型 + 首次询问 + 偏好设置窗口
@@ -348,7 +348,7 @@ deepseek-harness-desktop-for-macos/
 | 项 | 结论 |
 |---|---|
 | **hardened runtime 是否妨碍我们 spawn node** | **不妨碍。** 这是发布前唯一"没实测就不敢断言"的点。实测：给 app 打上 quarantine 属性模拟下载，Gatekeeper 判 `accepted / Notarized Developer ID`，运行后 `LauncherAgent → launcher → node(dsh-mfw) → node(dsh)` 整条链路正常，UI 返回 200。**不需要任何额外 entitlement**——hardened runtime 约束的是进程自身（加载 dylib、JIT），而子进程有自己的签名策略 |
-| **Team ID** | `D2U29Q6P4C`（取自 Developer ID 证书）。注意 Apple Development 证书括号里是另一串，不是 Team ID |
+| **Team ID 从哪读** | 取 **Developer ID Application** 证书 CN 括号里的那串。**Apple Development 证书括号里是另一串，不是 Team ID**——照它填会一路错到公证失败 |
 | **公证的 Team Key 限制** | App Store Connect 的 **Individual Key 不能用于公证**，会拿到不解释原因的 401；必须用 Team Key |
 | **`notarytool submit --wait` 会挂死** | 实测一次：Apple 侧早已 `Accepted`，本地 `--wait` 仍挂到 25 分钟超时，且它本该打印的 submission id 也随之丢失、无法续做。改为 submit 拿 id + 带上限轮询 `notarytool info`，超时时打印 id 与恢复命令 |
 | **票据只装订到 DMG，不在 app 上** | 用户把 app 拖进 `/Applications` 后，首次启动走在线校验。联网时无感；完全离线可能被拦一次。已写进 SECURITY.md。要消掉需要多一轮公证（先 zip app → 公证 → 装订 app → 再打 DMG），代价是发布时间翻倍 |

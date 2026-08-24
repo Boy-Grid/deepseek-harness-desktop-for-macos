@@ -177,16 +177,40 @@ rebase.
 
 ## Preferences
 
-⌘, opens two settings, both of which restart the served instance:
+⌘, opens the settings below. All of them except the port restart the served
+instance; the port needs the app itself restarted, because the state directory,
+the window title and every tab's address are derived from it.
 
 | Setting | Notes |
 |---|---|
 | **Which dsh to boot** | stock or multi-folder, with links to both projects |
 | **DSH home** | where sessions and credentials live, `~/.dsh` by default; also the way out of a baseline mismatch |
+| **Bind address** | `127.0.0.1` by default. See [Letting other devices in](#letting-other-devices-in) before changing it |
+| **Trusted hosts** | extra authorities for the web app's Host-header fence, comma-separated |
+| **Port** | `3080` by default; `DSH_LAUNCHER_PORT` takes precedence over the setting |
 
 Switching stops the running instance and starts the new one, then reloads every
 tab. If the instance cannot be stopped, the switch is reported as failed rather
 than silently doing nothing.
+
+### Letting other devices in
+
+Binding anywhere other than loopback is a deliberate choice with a consequence
+that is easy to underestimate: **the DeepSeek Harness web UI has no
+authentication.** No password, no token, nothing. Whoever can reach the port can
+drive an agent that reads and writes your files, runs commands, and uses
+credentials you have already signed in with.
+
+`--trusted-host` does not change that. It extends the Host-header check the web
+app uses to defend against DNS rebinding; it is not access control, and adding an
+authority grants nobody anything.
+
+So the app asks before opening the port, states that consequence, and defaults
+the confirmation to *Cancel*. Readiness checks and the tabs themselves always
+talk to `127.0.0.1` regardless of what was bound — `0.0.0.0` names an interface to
+listen on, not an address to connect to. If you do open it up, do so only on a
+network where you trust every device, and prefer an SSH tunnel or a
+reverse proxy that authenticates in front of dsh.
 
 ## Tabs
 
@@ -233,6 +257,8 @@ L="$HOME/Applications/DSH Desktop.app/Contents/MacOS/launcher"
 | Option | Environment | Default |
 |---|---|---|
 | `--port <n>` | `DSH_LAUNCHER_PORT` | `3080` |
+| `--host <host>` | `DSH_LAUNCHER_HOST` | `127.0.0.1` (see [above](#letting-other-devices-in)) |
+| `--trusted-host <authority>` | `DSH_LAUNCHER_TRUSTED_HOSTS` (newline-separated) | none; repeatable |
 | `--backend <stock\|mfw>` | `DSH_LAUNCHER_BACKEND` | `stock` |
 | `--dsh <path>` | `DSH_LAUNCHER_DSH` | probed, then cached in the state dir |
 | `--mfw <path>` | `DSH_LAUNCHER_MFW` | probed (mfw backend only) |
@@ -282,9 +308,12 @@ bash tests/run.sh t-04     # files matching "t-04"
 ```
 
 The suite covers the "only stop what we started" promise, ownership
-determination, backend and path resolution, the mfw guards, and the whole boot
-path. Cases that cannot run here are listed as SKIP rather than
-passing quietly. `shellcheck` runs too when installed.
+determination, backend and path resolution, the mfw guards, the whole boot path,
+and the bind-address rules on both sides — the script's classifier and the app's
+have to agree about what counts as loopback, so one test compiles a probe against
+`Preferences.swift` and checks the shipping code rather than a copy of it. Cases
+that cannot run here are listed as SKIP rather than passing quietly. `shellcheck`
+runs too when installed.
 
 ## Troubleshooting
 

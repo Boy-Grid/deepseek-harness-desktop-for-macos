@@ -38,19 +38,26 @@ assert_eq "" "$broken" "所有 md 的相对链接都存在"
 # A wrong anchor is not a broken link: the file opens, the reader just lands at
 # the top and has to go looking. Cheap to check, and it caught nothing only
 # because the last one was verified by hand.
+# The locale is pinned because the character class is the whole point: under a
+# UTF-8 one, [:alnum:] keeps CJK -- which is what GitHub does with a Chinese
+# heading -- while under LC_ALL=C it strips it and every anchor in README.zh.md
+# would slug to the empty string and match nothing.
 slug() { # heading text -> GitHub-style anchor
-    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
-        | sed 's/[^a-z0-9 -]//g; s/ /-/g'
+    printf '%s' "$1" | LC_ALL=en_US.UTF-8 tr '[:upper:]' '[:lower:]' \
+        | LC_ALL=en_US.UTF-8 sed 's/[^[:alnum:] _-]//g; s/ /-/g'
 }
 bad_anchors=""
 for f in ./*.md; do
     while read -r target; do
+        # Both shapes: a link into another file, and one into this same file --
+        # the second kind used to be skipped entirely, which is precisely where a
+        # typo is easiest to make and hardest to notice.
         case "$target" in
-            *.md#*) ;;
+            '#'*)     file="$f";           anchor="${target#\#}" ;;
+            *.md'#'*) file="${target%%#*}"; anchor="${target#*#}" ;;
             *) continue ;;
         esac
-        file="${target%%#*}"
-        anchor="${target#*#}"
+        [ -n "$anchor" ] || continue
         [ -f "$file" ] || continue
         found=0
         while IFS= read -r heading; do
@@ -69,6 +76,9 @@ assert_eq "" "$bad_anchors" "所有指向 md 的锚点都能对上标题"
 # check above would pass by never matching anything.
 assert_eq "not-built-yet" "$(slug 'Not built yet')" "反向验证：slug 规则正确"
 assert_ne "not-built-yet" "$(slug 'Not Built Yet extra')" "反向验证：slug 能区分不同标题"
+assert_eq "让其他设备访问" "$(slug '让其他设备访问')" "反向验证：中文标题的 slug 保留原字符"
+assert_eq "why-node-is-resolved-explicitly" "$(slug 'Why node is resolved explicitly.')" \
+    "反向验证：slug 去掉句末标点"
 
 # Reverse verification: the walk above must actually be able to see a break.
 probe=$(mktemp "${TMPDIR:-/tmp}/d4m-docs.XXXXXX").md
@@ -104,9 +114,22 @@ assert_contains "$security" "write" "SECURITY 讲到写面"
 assert_contains "$security" "mfw" "SECURITY 点名 mfw 后端"
 assert_contains "$security" "not the default" "SECURITY 写明它不是默认值"
 assert_contains "$security" "did not start" "SECURITY 载明「只停自己启动的」承诺"
+# The bind address is the one setting that changes who can use the machine, so
+# the documentation has to keep saying what that costs -- and has to keep saying
+# that the trusted-host list is not a mitigation, because it reads like one.
+assert_contains "$security" "no authentication" "SECURITY 写明 DSH 没有认证"
+assert_contains "$security" "not access control" "SECURITY 写明受信任主机不是访问控制"
+assert_contains "$security" "Cancel" "SECURITY 写明确认框默认在安全一侧"
 
 readme=$(cat README.md)
+readme_zh=$(cat README.zh.md)
 assert_contains "$readme" "Unofficial" "README 开头即声明非官方"
+# Both READMEs have to state the exposure cost in plain words, not defer to
+# SECURITY.md: the setting is reachable from the page that documents settings.
+assert_contains "$readme" "No password, no token, nothing." "README 直白讲清无认证"
+assert_contains "$readme" "is not access control" "README 写明受信任主机不是访问控制"
+assert_contains "$readme_zh" "没有任何认证" "中文 README 直白讲清无认证"
+assert_contains "$readme_zh" "不是访问控制" "中文 README 写明受信任主机不是访问控制"
 assert_contains "$readme" "not affiliated with" "README 载有免责声明"
 assert_contains "$readme" "macOS 14" "README 写明最低系统版本"
 # Matched on a short fragment on purpose: the full sentence wraps, and an

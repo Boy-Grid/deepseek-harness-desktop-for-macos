@@ -1041,7 +1041,9 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     override init() {
         let env = ProcessInfo.processInfo.environment
-        port = env["DSH_LAUNCHER_PORT"] ?? "3080"
+        // The environment wins over the preference, so a one-off `open` with a
+        // port set can sit alongside the configured one without editing settings.
+        port = env["DSH_LAUNCHER_PORT"] ?? Preferences.shared.port
         let bundle = Bundle.main.bundlePath
         scriptPath = bundle + "/Contents/MacOS/launcher"
         baseURL = URL(string: "http://127.0.0.1:\(port)")!
@@ -1110,9 +1112,14 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: scriptPath)
         var args: [String] = []
-        if port != "3080" { args += ["--port", port] }
+        if port != Preferences.defaultPort { args += ["--port", port] }
         args += ["--backend", (backend ?? Preferences.shared.backend).rawValue]
         if let home = Preferences.shared.dshHome { args += ["--dsh-home", home] }
+        // Passed on every subcommand, not just `start`: `status` prints the bind
+        // host it was given, and the log is easier to read when the two agree.
+        let host = Preferences.shared.bindHost
+        if host != Preferences.defaultBindHost { args += ["--host", host] }
+        for authority in Preferences.shared.trustedHosts { args += ["--trusted-host", authority] }
         args += [cmd]
         p.arguments = args
         // A double-clicked app starts at "/", and an inherited "/" is a bad
@@ -1518,7 +1525,7 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                              backing: .buffered, defer: false)
             // The app's own name, not the upstream product name: "DeepSeek Harness" is
             // DeepSeek's trademark and the title bar is its most visible use.
-            w.title = port == "3080" ? "DSH Desktop" : "DSH Desktop (\(port))"
+            w.title = port == Preferences.defaultPort ? "DSH Desktop" : "DSH Desktop (\(port))"
             w.minSize = NSSize(width: 760, height: 540)
             w.titleVisibility = .hidden          // the tab strip is the chrome
             w.titlebarAppearsTransparent = true  // content extends under the title bar
@@ -1878,6 +1885,7 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             let controller = PreferencesWindowController()
             controller.onRestartNeeded = { [weak self] in self?.restartInstance() }
             controller.onChanged = { [weak self] in self?.log("preferences changed (applies next start)") }
+            controller.onRelaunchNeeded = { [weak self] reason in self?.relaunchApp(reason: reason) }
             prefsController = controller
         }
         prefsController?.showWindow(nil)
@@ -1898,6 +1906,50 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             restartInstance()
         }
+    }
+
+    /// Restart the app itself, which is what a port change needs: the port is
+    /// read once at launch and the state directory, the window title and every
+    /// tab's URL are derived from it.
+    ///
+    /// Quitting already stops the running instance, so the only missing piece is
+    /// a new copy started afterwards. A detached shell waits for this pid to go
+    /// away first — starting the replacement while this one is still shutting
+    /// down would have two apps reaching for the same port.
+    private func relaunchApp(reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "需要重新启动应用"
+        alert.informativeText = reason + "\n\n已打开的标签会重新加载。"
+        alert.addButton(withTitle: "现在重启")
+        alert.addButton(withTitle: "稍后")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            log("relaunch declined; the new port applies at the next launch")
+            return
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // The pid and the bundle path arrive as arguments rather than spliced
+        // into the script text, so a path containing a quote cannot become code.
+        p.arguments = [
+            "-c",
+            #"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#,
+            "relaunch",
+            String(ProcessInfo.processInfo.processIdentifier),
+            Bundle.main.bundlePath,
+        ]
+        do {
+            try p.run()
+        } catch {
+            log("cannot spawn relaunch helper: \(error)")
+            let failed = NSAlert()
+            failed.messageText = "无法自动重启"
+            failed.informativeText = "设置已保存，请手动退出并重新打开应用。"
+            failed.addButton(withTitle: "好")
+            failed.runModal()
+            return
+        }
+        log("relaunching for a port change")
+        NSApp.terminate(nil)
     }
 
     /// Switch the served instance over to the current settings.

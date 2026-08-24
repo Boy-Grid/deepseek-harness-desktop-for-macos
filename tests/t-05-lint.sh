@@ -39,6 +39,35 @@ assert_eq "1" "${probe_hits:-0}" "反向验证：该规则确实能命中未加�
 assert_true "launcher 保持 set -u" -- grep -q '^set -u' "$REPO/launcher"
 assert_true "build.sh 保持 set -eu" -- grep -qE '^set -[a-z]*e[a-z]*u|^set -[a-z]*u[a-z]*e' "$REPO/build.sh"
 
+# --- the loopback rule is written twice, in two languages -------------------
+# The launcher has to classify a bind host without the app, and the app has to do
+# it without paying for a subprocess on every keystroke. Drift would show up as
+# the GUI warning about an address the script treats as private, or worse, the
+# script staying quiet about one the GUI thought was safe.
+launcher_loopback=$(sed -n '/^is_loopback()/,/^}/p' "$REPO/launcher")
+swift_loopback=$(sed -n '/static func isLoopback/,/^    }/p' "$REPO/Preferences.swift")
+for token in localhost "::1" "127."; do
+    assert_contains "$launcher_loopback" "$token" "launcher 的 loopback 判定覆盖 $token"
+    assert_contains "$swift_loopback" "$token" "Preferences.swift 的 loopback 判定覆盖 $token"
+done
+
+# --- the network settings actually reach the launcher -----------------------
+agent=$(cat "$REPO/LauncherAgent.swift")
+assert_contains "$agent" '["--host", host]' "GUI 把绑定地址传给 launcher"
+assert_contains "$agent" '["--trusted-host", authority]' "GUI 把受信任主机逐个传给 launcher"
+# Readiness and every tab talk to loopback whatever was bound, because 0.0.0.0 is
+# an interface to listen on rather than an address to connect to.
+assert_contains "$agent" 'http://127.0.0.1:\(port)' "标签地址固定走 loopback"
+assert_contains "$(sed -n '/^url_up()/,/^}/p' "$REPO/launcher")" "\$URL" "就绪探测用 URL"
+assert_contains "$(grep '^URL=' "$REPO/launcher")" "PROBE_HOST" "URL 由 PROBE_HOST 构成，与绑定地址无关"
+
+# The warning shown before opening the port has to name the consequence. A
+# generic "please be careful" would leave the user unable to judge the trade.
+prefs=$(cat "$REPO/Preferences.swift")
+assert_contains "$prefs" "没有认证机制" "对外开放的警告点明 DSH 无认证"
+assert_contains "$prefs" "不做访问控制" "警告说明受信任主机不是访问控制"
+assert_contains "$prefs" 'addButton(withTitle: "取消")' "危险确认框把安全选项放在默认位"
+
 # --- shellcheck --------------------------------------------------------------
 if command -v shellcheck >/dev/null 2>&1; then
     # -x follows sourced files, so helpers defined in lib/assert.sh and in the

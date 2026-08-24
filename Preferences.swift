@@ -50,6 +50,58 @@ enum Backend: String, CaseIterable {
         """
 }
 
+// MARK: - Network exposure
+
+/// The rules and the wording for letting dsh listen somewhere other than
+/// loopback.
+///
+/// This is the one setting in the app that can change who is able to use the
+/// machine, so the consequence is spelled out rather than hinted at: the
+/// DeepSeek Harness web UI ships no authentication of any kind. Its
+/// `--trusted-host` fence validates the Host header (a defence against DNS
+/// rebinding); it does not ask anyone who they are. Reachable therefore means
+/// operable, by whoever can route to the interface.
+enum NetworkExposure {
+    /// Mirrors `is_loopback` in the `launcher` script. Both copies exist because
+    /// the script must decide this without the app, and the app must decide it
+    /// without paying for a subprocess on every keystroke; tests/t-05-lint.sh
+    /// asserts the two lists stay in step.
+    static func isLoopback(_ host: String) -> Bool {
+        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
+        return h == "localhost" || h == "::1" || h == "[::1]" || h.hasPrefix("127.")
+    }
+
+    /// Split a free-typed list of authorities on commas and whitespace.
+    static func parseAuthorities(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == "," || $0.isWhitespace })
+            .map { String($0) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// nil for anything that is not a usable TCP port, so the caller can refuse
+    /// instead of writing a value that only fails later at bind time.
+    static func normalizedPort(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let n = Int(trimmed), (1...65535).contains(n) else { return nil }
+        return String(n)
+    }
+
+    static let warningTitle = "确定要让其他设备访问吗？"
+
+    static func warning(for host: String) -> String {
+        """
+        绑定到 \(host) 之后，能连上这台机器该地址的人都可以直接使用 DSH，\
+        不需要任何密码或令牌 —— DeepSeek Harness 的 Web 界面没有认证机制。
+
+        这意味着同一网络里的任何人都可以让 Agent 读写你的文件、执行命令、\
+        使用你已登录的凭据。「受信任主机」只校验 Host 头，用于防御 DNS 重绑定，\
+        它不做访问控制。
+
+        只有当你信任这个网络上的每一台设备时才这样做。
+        """
+    }
+}
+
 // MARK: - Preferences
 
 /// UserDefaults-backed settings. Deliberately small — anything the launcher
@@ -64,7 +116,13 @@ final class Preferences {
         static let dshHome = "dshHome"
         static let backendChosen = "backendChosen"
         static let tabs = "tabs"
+        static let bindHost = "bindHost"
+        static let trustedHosts = "trustedHosts"
+        static let port = "port"
     }
+
+    static let defaultBindHost = "127.0.0.1"
+    static let defaultPort = "3080"
 
     private init() {}
 
@@ -85,6 +143,30 @@ final class Preferences {
     var backendChosen: Bool {
         get { defaults.bool(forKey: Key.backendChosen) }
         set { defaults.set(newValue, forKey: Key.backendChosen) }
+    }
+
+    /// The interface dsh binds to. Loopback unless the user deliberately opened
+    /// it up — see `NetworkExposure` for why that is a question worth asking.
+    var bindHost: String {
+        get { nonEmpty(defaults.string(forKey: Key.bindHost)) ?? Preferences.defaultBindHost }
+        set { defaults.set(nonEmpty(newValue), forKey: Key.bindHost) }
+    }
+
+    /// Extra authorities for the web app's Host-header fence, one per entry.
+    /// Needed when the UI is reached through a name the server does not already
+    /// trust (a reverse proxy, an mDNS name), not for granting access.
+    var trustedHosts: [String] {
+        get { defaults.stringArray(forKey: Key.trustedHosts) ?? [] }
+        set { defaults.set(NetworkExposure.parseAuthorities(newValue.joined(separator: " ")),
+                           forKey: Key.trustedHosts) }
+    }
+
+    /// The port to serve on. Read at launch only: the state directory, the window
+    /// title and every tab's URL are derived from it, so a change needs the app
+    /// restarted rather than just the instance.
+    var port: String {
+        get { nonEmpty(defaults.string(forKey: Key.port)) ?? Preferences.defaultPort }
+        set { defaults.set(NetworkExposure.normalizedPort(newValue), forKey: Key.port) }
     }
 
     /// The tabs to restore on the next launch, in chronological order.
@@ -173,15 +255,21 @@ enum FirstRunPrompt {
 /// A small settings window: which backend, and which DSH home. Both require the
 /// served instance to be restarted, so the controller reports the change and
 /// lets the Agent decide what to do about it.
-final class PreferencesWindowController: NSWindowController {
+final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate {
     /// Called when a change requires the instance to be restarted.
     var onRestartNeeded: (() -> Void)?
     /// Called when the user declines the restart.
     var onChanged: (() -> Void)?
+    /// Called when a change can only take effect with the whole app restarted.
+    var onRelaunchNeeded: ((String) -> Void)?
 
     private let backendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let homeField = NSTextField(string: "")
     private let mfwNote = bodyLabel("", width: 420)
+    private let bindHostField = NSTextField(string: "")
+    private let trustedField = NSTextField(string: "")
+    private let portField = NSTextField(string: "")
+    private let exposureNote = bodyLabel("", width: 420)
 
     convenience init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
@@ -189,7 +277,13 @@ final class PreferencesWindowController: NSWindowController {
                               backing: .buffered, defer: false)
         window.title = "偏好设置"
         self.init(window: window)
-        window.contentView = buildContent()
+        let content = buildContent()
+        window.contentView = content
+        // The window is not resizable and the content grew a section, so its
+        // height comes from the layout rather than from a number kept in sync by
+        // hand.
+        content.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 480, height: content.fittingSize.height))
         window.center()
     }
 
@@ -205,7 +299,7 @@ final class PreferencesWindowController: NSWindowController {
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -20),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20),
         ])
 
         // --- backend ---
@@ -239,8 +333,70 @@ final class PreferencesWindowController: NSWindowController {
                                 + "当 dsh-mfw 的基线与已安装的 dsh 版本错开时，"
                                 + "必须在这里指定一个独立目录才能启动 mfw。", width: 420), in: .top)
 
+        // --- network ---
+        stack.addView(sectionTitle("网络访问"), in: .top)
+        stack.addView(fieldRow(label: "绑定地址", field: bindHostField,
+                               value: Preferences.shared.bindHost,
+                               placeholder: Preferences.defaultBindHost,
+                               reset: #selector(resetBindHost)), in: .top)
+        stack.addView(exposureNote, in: .top)
+
+        stack.addView(fieldRow(label: "受信任主机", field: trustedField,
+                               value: Preferences.shared.trustedHosts.joined(separator: ", "),
+                               placeholder: "留空即可，例：dsh.local, box:3080",
+                               reset: #selector(resetTrusted)), in: .top)
+        stack.addView(bodyLabel("额外允许的 Host 头，逗号分隔。只在通过反向代理或另一个域名"
+                                + "访问时需要；它校验 Host 头以防 DNS 重绑定，不是访问控制。",
+                                width: 420), in: .top)
+
+        stack.addView(fieldRow(label: "端口", field: portField,
+                               value: Preferences.shared.port,
+                               placeholder: Preferences.defaultPort,
+                               reset: #selector(resetPort)), in: .top)
+        stack.addView(bodyLabel("端口决定了状态目录与每个标签的地址，改动需要重新启动应用。"
+                                + "环境变量 DSH_LAUNCHER_PORT 优先于这里的设置。", width: 420), in: .top)
+
         updateMFWNote()
+        updateExposureNote()
         return root
+    }
+
+    /// A labelled, editable one-line field with a "back to default" button.
+    private func fieldRow(label: String, field: NSTextField, value: String,
+                          placeholder: String, reset: Selector) -> NSView {
+        let caption = NSTextField(labelWithString: label)
+        caption.font = .systemFont(ofSize: 11)
+        caption.alignment = .right
+        caption.widthAnchor.constraint(equalToConstant: 68).isActive = true
+
+        field.stringValue = value
+        field.placeholderString = placeholder
+        field.font = .systemFont(ofSize: 11)
+        field.delegate = self
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let button = NSButton(title: "用默认", target: self, action: reset)
+        button.bezelStyle = .rounded
+
+        let row = NSStackView(views: [caption, field, button])
+        row.orientation = .horizontal
+        row.spacing = 8
+        field.widthAnchor.constraint(greaterThanOrEqualTo: row.widthAnchor, multiplier: 0.45).isActive = true
+        return row
+    }
+
+    /// Restate the current exposure in place, so the window itself says whether
+    /// this instance is private — not only the alert shown when it changed.
+    private func updateExposureNote() {
+        let host = Preferences.shared.bindHost
+        if NetworkExposure.isLoopback(host) {
+            exposureNote.stringValue = "仅这台机器可以访问。改成 0.0.0.0 会让局域网内的设备也能访问。"
+            exposureNote.textColor = .secondaryLabelColor
+        } else {
+            exposureNote.stringValue = "⚠︎ 已对外开放：能连到 \(host) 的设备都可以直接使用 DSH，"
+                + "而 DSH 没有任何认证。请只在完全信任的网络中保持这个设置。"
+            exposureNote.textColor = .systemRed
+        }
     }
 
     private func sectionTitle(_ text: String) -> NSTextField {
@@ -306,6 +462,98 @@ final class PreferencesWindowController: NSWindowController {
         homeField.stringValue = ""
         Preferences.shared.dshHome = nil
         requestRestart(reason: "改变 DSH home 需要重新启动实例。")
+    }
+
+    // MARK: network actions
+
+    /// Commit on Enter and on focus loss alike: a value typed and then clicked
+    /// away from has been entered, and silently dropping it would be worse than
+    /// asking about it.
+    func controlTextDidEndEditing(_ note: Notification) {
+        switch note.object as? NSTextField {
+        case bindHostField: commitBindHost()
+        case trustedField:  commitTrusted()
+        case portField:     commitPort()
+        default: break
+        }
+    }
+
+    @objc private func resetBindHost() {
+        bindHostField.stringValue = Preferences.defaultBindHost
+        commitBindHost()
+    }
+
+    @objc private func resetTrusted() {
+        trustedField.stringValue = ""
+        commitTrusted()
+    }
+
+    @objc private func resetPort() {
+        portField.stringValue = Preferences.defaultPort
+        commitPort()
+    }
+
+    private func commitBindHost() {
+        let typed = bindHostField.stringValue.trimmingCharacters(in: .whitespaces)
+        let host = typed.isEmpty ? Preferences.defaultBindHost : typed
+        guard host != Preferences.shared.bindHost else {
+            bindHostField.stringValue = host
+            return
+        }
+        // Leaving loopback is the one change here that alters who can use this
+        // machine, so it needs an explicit yes, and the safe button is the
+        // default one — Enter must not be enough to open the door.
+        if !NetworkExposure.isLoopback(host) {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = NetworkExposure.warningTitle
+            alert.informativeText = NetworkExposure.warning(for: host)
+            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: "我了解，仍要开放")
+            guard alert.runModal() != .alertFirstButtonReturn else {
+                bindHostField.stringValue = Preferences.shared.bindHost
+                return
+            }
+        }
+        Preferences.shared.bindHost = host
+        bindHostField.stringValue = host
+        updateExposureNote()
+        requestRestart(reason: "改变绑定地址需要停止当前实例并重新启动。")
+    }
+
+    private func commitTrusted() {
+        let list = NetworkExposure.parseAuthorities(trustedField.stringValue)
+        let normalized = list.joined(separator: ", ")
+        guard list != Preferences.shared.trustedHosts else {
+            trustedField.stringValue = normalized
+            return
+        }
+        Preferences.shared.trustedHosts = list
+        trustedField.stringValue = normalized
+        requestRestart(reason: "改变受信任主机需要停止当前实例并重新启动。")
+    }
+
+    private func commitPort() {
+        let typed = portField.stringValue.trimmingCharacters(in: .whitespaces)
+        let source = typed.isEmpty ? Preferences.defaultPort : typed
+        // Refuse rather than store something that would only fail at bind time.
+        guard let port = NetworkExposure.normalizedPort(source) else {
+            portField.stringValue = Preferences.shared.port
+            let alert = NSAlert()
+            alert.messageText = "端口无效"
+            alert.informativeText = "「\(typed)」不是 1–65535 之间的端口号，设置未改动。"
+            alert.addButton(withTitle: "好")
+            alert.runModal()
+            return
+        }
+        guard port != Preferences.shared.port else {
+            portField.stringValue = port
+            return
+        }
+        Preferences.shared.port = port
+        portField.stringValue = port
+        onRelaunchNeeded?("端口已改为 \(port)。它决定了状态目录与每个标签的地址，"
+                          + "需要重新启动应用才能生效。")
     }
 
     private func requestRestart(reason: String) {

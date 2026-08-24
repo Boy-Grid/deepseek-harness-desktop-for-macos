@@ -47,13 +47,43 @@ Termination escalates SIGTERM → wait → SIGKILL, and only ever over that tree
 
 ### Network
 
-The instance listens on `127.0.0.1` only, on port 3080 by default. This app adds
+By default the instance listens on `127.0.0.1` only, on port 3080. This app adds
 no listener of its own and makes no outbound connections except the readiness
 probe to that local URL. Nothing is sent anywhere by this app.
 
 Navigation is fenced: anything not same-origin with the local instance is handed
 to the default browser instead of loading in the window. Same-origin
 `window.open` becomes a new tab.
+
+#### Binding somewhere reachable
+
+The bind address is configurable (Preferences, or `--host` / `DSH_LAUNCHER_HOST`),
+and it is the one setting in this app that can change **who** is able to use the
+machine. It therefore comes with a plain statement rather than a hint:
+
+> The DeepSeek Harness web UI has no authentication. No password, no token.
+> Anyone who can reach the port can drive an agent that reads and writes your
+> files, runs commands, and uses credentials you have already signed in with.
+
+`--trusted-host` does not mitigate this. It extends the Host-header check that the
+web app uses against DNS rebinding; it is not access control, and adding an
+authority grants nobody anything. Upstream fills that list with the machine's own
+LAN addresses automatically as soon as `0.0.0.0` is bound.
+
+What this app does about it:
+
+- loopback is the default, and is what a fresh install uses;
+- changing to anything else requires confirming a dialog that states the
+  consequence above, with *Cancel* as the default button;
+- the preferences window keeps showing the exposure in red while it is in effect,
+  so it cannot be forgotten after the dialog is dismissed;
+- every `start` repeats the warning on stderr and in the log, because the choice
+  outlives the moment it was made;
+- readiness probes and the tabs always connect to `127.0.0.1` whatever is bound.
+
+If you need remote access, an SSH tunnel or a reverse proxy that authenticates in
+front of dsh is the safer shape. Binding to a LAN interface is appropriate only
+on a network where every device is trusted.
 
 ### The multi-folder backend widens the agent's write surface
 

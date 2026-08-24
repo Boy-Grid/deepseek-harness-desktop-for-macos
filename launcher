@@ -38,6 +38,10 @@
 #
 # Options (also settable via environment):
 #   --port <n>                   listen port            (DSH_LAUNCHER_PORT, default 3080)
+#   --host <host>                interface to bind      (DSH_LAUNCHER_HOST, default 127.0.0.1)
+#   --trusted-host <authority>   extra authority for the web app's Host-header
+#                                fence; repeatable      (DSH_LAUNCHER_TRUSTED_HOSTS,
+#                                newline-separated)
 #   --backend <stock|mfw>        which dsh to boot      (DSH_LAUNCHER_BACKEND, default stock)
 #   --dsh <path>                 dsh binary to use      (DSH_LAUNCHER_DSH)
 #   --mfw <path>                 dsh-mfw entry to use   (DSH_LAUNCHER_MFW)
@@ -59,7 +63,17 @@
 set -u
 
 PROG="DSH Desktop"
-HOST="127.0.0.1"
+# The interface dsh binds to.  Loopback by default, and that default matters:
+# DeepSeek Harness serves its UI with **no authentication**, so binding anywhere
+# reachable hands whoever can reach it an agent that reads and writes files and
+# runs commands.  Its `--trusted-host` fence is Host-header validation against DNS
+# rebinding, not access control.
+BIND_HOST="${DSH_LAUNCHER_HOST:-127.0.0.1}"
+# Readiness is always probed over loopback: 0.0.0.0 is an interface to bind, not
+# a meaningful address to connect to.
+PROBE_HOST="127.0.0.1"
+# Extra authorities for that fence, newline-separated (repeatable --trusted-host).
+TRUSTED_HOSTS="${DSH_LAUNCHER_TRUSTED_HOSTS:-}"
 PORT="${DSH_LAUNCHER_PORT:-3080}"
 BACKEND="${DSH_LAUNCHER_BACKEND:-stock}"
 NO_BROWSER="${DSH_LAUNCHER_NO_BROWSER:-0}"
@@ -127,6 +141,13 @@ while [ $# -gt 0 ]; do
         --node=*)  NODE_BIN_OVERRIDE="${1#*=}"; shift ;;
         --dsh-home)   [ $# -ge 2 ] && DSH_HOME_OVERRIDE="${2}"; shift 2 ;;
         --dsh-home=*) DSH_HOME_OVERRIDE="${1#*=}"; shift ;;
+        --host)    [ $# -ge 2 ] && BIND_HOST="${2}"; shift 2 ;;
+        --host=*)  BIND_HOST="${1#*=}"; shift ;;
+        # Repeatable, like the flag it forwards to.
+        --trusted-host)   [ $# -ge 2 ] && TRUSTED_HOSTS="${TRUSTED_HOSTS}${TRUSTED_HOSTS:+
+}${2}"; shift 2 ;;
+        --trusted-host=*) TRUSTED_HOSTS="${TRUSTED_HOSTS}${TRUSTED_HOSTS:+
+}${1#*=}"; shift ;;
         --allow-version-skew) ALLOW_SKEW=1; shift ;;
         --state)   [ $# -ge 2 ] && STATE_DIR="${2}" && STATE_EXPLICIT=1; shift 2 ;;
         --state=*) STATE_DIR="${1#*=}"; STATE_EXPLICIT=1; shift ;;
@@ -139,7 +160,7 @@ case "$BACKEND" in
     stock|mfw) ;;
     *) echo "$PROG: unknown backend: $BACKEND (expected 'stock' or 'mfw')" >&2; exit 2 ;;
 esac
-URL="http://${HOST}:${PORT}"
+URL="http://${PROBE_HOST}:${PORT}"
 # State is partitioned so that two differently-booted instances can never read
 # each other's pid file: a non-stock backend adds its own level, a non-default
 # port adds another.  stock+3080 keeps the historical path untouched, so an
@@ -196,6 +217,19 @@ ensure_state() {
 
 url_up() {
     curl -s -o /dev/null --max-time 2 "$URL" 2>/dev/null
+}
+
+# Whether a bind host keeps the server unreachable from other machines.  Every
+# other value -- including 0.0.0.0 and any concrete interface address -- puts an
+# unauthenticated agent on the network, so callers treat this as the line between
+# "private" and "needs the user to have said yes on purpose".
+is_loopback() {
+    case "$1" in
+        # '[::1]' is quoted: unquoted, the brackets would be a glob character
+        # class matching a single ':' or '1' instead of a bracketed IPv6 literal.
+        localhost|::1|'[::1]'|127.*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # lsof lives in /usr/sbin, which a stripped PATH (cron, CI, an agent shell) may
@@ -739,6 +773,14 @@ status_of() {
     echo "status:  $( [ "$up" -eq 1 ] && echo running || echo stopped )"
     echo "backend: $BACKEND"
     echo "port:    $PORT"
+    if is_loopback "$BIND_HOST"; then
+        echo "bind:    $BIND_HOST"
+    else
+        echo "bind:    $BIND_HOST  (reachable from other machines; dsh has no authentication)"
+    fi
+    if [ -n "$TRUSTED_HOSTS" ]; then
+        echo "trusted: $(echo "$TRUSTED_HOSTS" | tr '\n' ' ')"
+    fi
     echo "url:     $URL"
     echo "home:    $EFFECTIVE_DSH_HOME$( [ "$DSH_HOME_ISOLATED" -eq 1 ] && echo "  (isolated)" )"
     echo "state:   $STATE_DIR"
@@ -856,14 +898,22 @@ start_server() {
         provision_mfw "$node_bin" "$entry" "$child_pathv" || return 1
         # No --profile here: dsh-mfw supplies its own (--profile mfw plus its
         # patch overlay) and a second one would collide.
-        args=(web --host "$HOST" --port "$PORT" --no-open)
+        args=(web --host "$BIND_HOST" --port "$PORT" --no-open)
     else
         if ! entry=$(resolve_dsh); then
             start_fail "找不到 dsh CLI。请先运行 npm install -g @deepseek-ai/dsh，或用 --dsh 指定路径"
             return 1
         fi
-        args=(--profile web --host "$HOST" --port "$PORT" --no-open)
+        args=(--profile web --host "$BIND_HOST" --port "$PORT" --no-open)
     fi
+
+    # `--trusted-host` takes one authority per occurrence, so each line becomes
+    # its own flag.  Appended in a loop rather than spliced from an array because
+    # macOS ships bash 3.2, where expanding an empty array under `set -u` aborts.
+    while IFS= read -r authority; do
+        [ -n "$authority" ] || continue
+        args+=(--trusted-host "$authority")
+    done <<<"$TRUSTED_HOSTS"
 
     # `--no-open` belongs to the web app, not to the dsh CLI — dsh declares
     # allowUnknownOption()/passThroughOptions() and forwards it to the booted
@@ -871,6 +921,18 @@ start_server() {
     # the URL to the default browser and the user gets a duplicate of the page
     # this app is about to show in its own window.  The mfw backend forwards it
     # the same way.
+    # Binding off-loopback is a deliberate choice with a consequence worth
+    # restating at every start, not just at the moment it was configured: the
+    # DeepSeek Harness UI ships no authentication, so anyone who can reach this
+    # interface can drive an agent that reads and writes files and runs commands.
+    if ! is_loopback "$BIND_HOST"; then
+        # Braced on purpose: bash 3.2 in a UTF-8 locale folds the leading byte of
+        # the following full-width comma into the variable name.
+        local warn="警告：正在把 dsh 绑定到 ${BIND_HOST}，而不是仅本机的 127.0.0.1。DSH 的 Web 界面没有任何认证，能访问到这个地址的人都可以操作 agent 读写文件、执行命令。请只在可信网络中这样用。"
+        echo "$PROG: $warn" >&2
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] launcher: $warn" >>"$WEB_LOG"
+    fi
+
     log "starting [$BACKEND]: $node_bin $entry ${args[*]}"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] launcher: starting $BACKEND on $URL (DSH_HOME=$EFFECTIVE_DSH_HOME)" >>"$WEB_LOG"
     nohup env "PATH=$child_pathv" "DSH_HOME=$EFFECTIVE_DSH_HOME" \

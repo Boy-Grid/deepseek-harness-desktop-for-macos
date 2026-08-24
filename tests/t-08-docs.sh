@@ -34,6 +34,42 @@ EOF
 done
 assert_eq "" "$broken" "所有 md 的相对链接都存在"
 
+# --- anchors must resolve to a heading -------------------------------------
+# A wrong anchor is not a broken link: the file opens, the reader just lands at
+# the top and has to go looking. Cheap to check, and it caught nothing only
+# because the last one was verified by hand.
+slug() { # heading text -> GitHub-style anchor
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+        | sed 's/[^a-z0-9 -]//g; s/ /-/g'
+}
+bad_anchors=""
+for f in ./*.md; do
+    while read -r target; do
+        case "$target" in
+            *.md#*) ;;
+            *) continue ;;
+        esac
+        file="${target%%#*}"
+        anchor="${target#*#}"
+        [ -f "$file" ] || continue
+        found=0
+        while IFS= read -r heading; do
+            [ "$(slug "$heading")" = "$anchor" ] && { found=1; break; }
+        done <<EOF
+$(sed -n 's/^#\{1,6\} //p' "$file")
+EOF
+        [ "$found" -eq 1 ] || bad_anchors="$bad_anchors $(basename "$f")→${target}"
+    done <<EOF
+$(grep -oE '\]\([^)]*\)' "$f" | sed 's/^](//; s/)$//')
+EOF
+done
+assert_eq "" "$bad_anchors" "所有指向 md 的锚点都能对上标题"
+
+# Reverse verification: the slug function has to match GitHub's shape, or the
+# check above would pass by never matching anything.
+assert_eq "not-built-yet" "$(slug 'Not built yet')" "反向验证：slug 规则正确"
+assert_ne "not-built-yet" "$(slug 'Not Built Yet extra')" "反向验证：slug 能区分不同标题"
+
 # Reverse verification: the walk above must actually be able to see a break.
 probe=$(mktemp "${TMPDIR:-/tmp}/d4m-docs.XXXXXX").md
 printf '[gone](no-such-file.md)\n' > "$probe"

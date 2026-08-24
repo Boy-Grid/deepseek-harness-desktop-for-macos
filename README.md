@@ -272,9 +272,11 @@ TabStore.swift          per-tab persistent stores: create, remove, sweep orphans
 launcher                instance lifetime: start/stop/status, backends, state dirs
 Info.plist              bundle metadata; LSMinimumSystemVersion drives the build
 icon.icns, make-icon.py the app icon and the script that composes it
-build.sh                assemble, compile, sign, register
+build.sh                assemble, compile, sign, register; --release for shipping
+scripts/make-dmg.sh     package, notarize, staple, checksum
 tests/                  run.sh, lib/assert.sh, t-*.sh, fixtures/
-.github/workflows/      CI: lint, tests, build and verify the bundle
+.github/workflows/      CI, and the release workflow
+OPENSOURCE-PLAN.md      roadmap: what is built, what is not, what is declined
 ```
 
 ## Regenerating the icon

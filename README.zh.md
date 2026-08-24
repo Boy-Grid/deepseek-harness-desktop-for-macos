@@ -241,9 +241,11 @@ TabStore.swift          每标签持久化存储：创建、删除、清理孤�
 launcher                实例生命周期：start/stop/status、双后端、状态目录
 Info.plist              bundle 元数据；LSMinimumSystemVersion 决定构建目标
 icon.icns, make-icon.py 应用图标与合成脚本
-build.sh                组装、编译、签名、注册
+build.sh                组装、编译、签名、注册；--release 用于发布
+scripts/make-dmg.sh     打包、公证、装订、校验和
 tests/                  run.sh、lib/assert.sh、t-*.sh、fixtures/
-.github/workflows/      CI：lint、测试、构建并校验 bundle
+.github/workflows/      CI 与发布 workflow
+OPENSOURCE-PLAN.md      路线图：已实现 / 未实现 / 明确不做（英文）
 ```
 
 ## 重新生成图标

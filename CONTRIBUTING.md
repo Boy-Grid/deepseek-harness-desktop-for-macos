@@ -36,9 +36,10 @@ the one it resolved in `status`).
   reading live DOM geometry from a `[class*="centerCol"]` element. An upstream
   style change breaks that silently (it degrades to "not aligned" rather than
   crashing). Fixes and a more robust hook are welcome.
-- Anything in the "not done" lists in `OPENSOURCE-PLAN.md`. That file is the
-  design and decision record — including things that were tried and reverted, and
-  why — rather than user documentation, and it is written in Chinese.
+- Anything under [Not built yet](OPENSOURCE-PLAN.md#not-built-yet). Items marked
+  **[good first PR]** there are self-contained and do not need deep knowledge of
+  the codebase. That file also lists what is deliberately *not* being done, so a
+  proposal does not have to be guessed at.
 
 ## Conventions
 

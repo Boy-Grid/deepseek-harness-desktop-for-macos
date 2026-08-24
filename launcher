@@ -27,6 +27,15 @@
 #   launcher open                open the UI in the default browser
 #   launcher help                show this message
 #
+#   launcher runtime status      what this app fetched, and what the system has
+#   launcher runtime install     fetch Node.js and dsh into this app's directory
+#   launcher runtime uninstall   remove them again (DSH data is untouched)
+#
+# Nothing is bundled: the disk image carries neither Node.js nor dsh.  A runtime
+# the user installed themselves always wins; `runtime install` is for the case
+# where there is none, and it verifies Node's tarball against a checksum pinned
+# in this script before unpacking anything.
+#
 # Options (also settable via environment):
 #   --port <n>                   listen port            (DSH_LAUNCHER_PORT, default 3080)
 #   --backend <stock|mfw>        which dsh to boot      (DSH_LAUNCHER_BACKEND, default stock)
@@ -59,6 +68,24 @@ MFW_BIN_OVERRIDE="${DSH_LAUNCHER_MFW:-}"
 NODE_BIN_OVERRIDE="${DSH_LAUNCHER_NODE:-}"
 DSH_HOME_OVERRIDE="${DSH_LAUNCHER_DSH_HOME:-}"
 ALLOW_SKEW="${DSH_LAUNCHER_ALLOW_VERSION_SKEW:-0}"
+# --- managed runtime -------------------------------------------------------
+# Pinned, with the checksums pinned alongside.  Taking the checksum from the same
+# server as the download only proves the two agree; pinning it here means a
+# compromised mirror -- or a compromised nodejs.org -- still cannot get code past
+# this script.  Updating Node means updating all three of these together, and
+# tests/t-09-runtime.sh asserts they stay well-formed.
+#
+# From https://nodejs.org/dist/v22.23.2/SHASUMS256.txt
+MANAGED_NODE_VERSION="v22.23.2"
+MANAGED_NODE_SHA256_ARM64="61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6"
+MANAGED_NODE_SHA256_X64="58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026"
+# Overridable for tests, which serve a small fake tarball from localhost rather
+# than pulling 48 MB. Not a security boundary: anyone able to set these could
+# replace this script outright.
+NODE_DIST_BASE="${DSH_LAUNCHER_NODE_DIST:-https://nodejs.org/dist}"
+NODE_SHA_OVERRIDE="${DSH_LAUNCHER_NODE_SHA256:-}"
+MANAGED_DSH_SPEC="${DSH_LAUNCHER_DSH_SPEC:-@deepseek-ai/dsh}"
+
 START_TIMEOUT=60      # seconds to wait for the UI to answer
 STOP_TIMEOUT=20       # seconds to wait for the port to close
 PROVISION_TIMEOUT=900 # seconds to wait for a first-run mfw runtime (installs ~300 MB)
@@ -76,9 +103,18 @@ fi
 # argument parsing
 # ---------------------------------------------------------------------------
 CMD="launch"
+SUBCMD=""
 while [ $# -gt 0 ]; do
     case "$1" in
         start|stop|restart|status|open|launch|help) CMD="$1"; shift ;;
+        runtime)
+            CMD="runtime"; shift
+            case "${1:-status}" in
+                status|install|uninstall) SUBCMD="$1"; shift ;;
+                -*|"") SUBCMD="status" ;;
+                *) echo "$PROG: unknown runtime subcommand: $1" >&2; exit 2 ;;
+            esac
+            ;;
         --port)    [ $# -ge 2 ] && PORT="${2}"; shift 2 ;;
         --port=*)  PORT="${1#*=}"; shift ;;
         --backend)   [ $# -ge 2 ] && BACKEND="${2}"; shift 2 ;;
@@ -110,9 +146,19 @@ URL="http://${HOST}:${PORT}"
 # existing install keeps its cached paths and logs.
 if [ "$STATE_EXPLICIT" -eq 0 ]; then
     STATE_DIR="$HOME/Library/Application Support/DSH Desktop"
+    BASE_STATE_DIR="$STATE_DIR"
     [ "$BACKEND" = "stock" ] || STATE_DIR="$STATE_DIR/$BACKEND"
     [ "$PORT" = "3080" ] || STATE_DIR="$STATE_DIR/ports/$PORT"
+else
+    BASE_STATE_DIR="$STATE_DIR"
 fi
+# A managed runtime is shared by every backend and every port, so it hangs off
+# the base directory rather than a partition of it -- otherwise each port would
+# download its own ~50 MB copy of Node.
+RUNTIME_DIR="$BASE_STATE_DIR/runtime"
+RUNTIME_NODE_DIR="$RUNTIME_DIR/node"
+RUNTIME_NPM_DIR="$RUNTIME_DIR/npm"
+RUNTIME_MANIFEST="$RUNTIME_DIR/manifest.json"
 LOG_DIR="$STATE_DIR/logs"
 WEB_LOG="$LOG_DIR/web.log"
 PID_FILE="$STATE_DIR/web.pid"
@@ -278,8 +324,15 @@ resolve_dsh() {
     if [ -z "$found" ]; then
         found=$(ls -t "$HOME"/.npm/_npx/*/node_modules/.bin/dsh 2>/dev/null | head -1)
     fi
+    # Our own copy last: a dsh the user installed themselves wins, because that is
+    # the one they maintain and expect.
+    if [ -z "$found" ] && managed_dsh_ready; then
+        found=$(managed_dsh_entry)
+    fi
     if [ -z "$found" ]; then
-        echo "$PROG: cannot find the 'dsh' CLI. Install it with:  npm install -g @deepseek-ai/dsh" >&2
+        echo "$PROG: cannot find the 'dsh' CLI. Either install it yourself:" >&2
+        echo "      npm install -g @deepseek-ai/dsh" >&2
+        echo "      or let this app fetch a private copy:  launcher runtime install" >&2
         echo "      or pass --dsh <path>" >&2
         return 1
     fi
@@ -330,12 +383,18 @@ mfw_baseline() {
 }
 
 # The version of the dsh the user has installed, if one is resolvable at all.
-installed_dsh_version() {
-    local bin real pkg
-    bin=$(resolve_dsh 2>/dev/null) || return 1
-    real=$(realpath_of "$bin" 2>/dev/null) || return 1
+# Version of the dsh at a given entry path (npm's bin symlink or the js itself).
+installed_dsh_version_at() {
+    local real pkg
+    real=$(realpath_of "$1" 2>/dev/null) || return 1
     pkg="$(dirname "$(dirname "$real")")/package.json"
     pkg_version "$pkg"
+}
+
+installed_dsh_version() {
+    local bin
+    bin=$(resolve_dsh 2>/dev/null) || return 1
+    installed_dsh_version_at "$bin"
 }
 
 # dsh-mfw pins an exact dsh baseline, because upstream packages reference each
@@ -375,30 +434,258 @@ version_skew_guard() {
 # GUI (double-click) environment has a minimal PATH that rarely contains node
 # (nvm / ~/.local / volta installs live outside system PATH) — so we resolve
 # node explicitly and run the dsh entry with it directly.
-resolve_node() {
+# ---------------------------------------------------------------------------
+# managed runtime: download Node and install dsh into our own directory
+#
+# This app deliberately ships neither -- the disk image stays around a megabyte
+# and nobody has to trust a runtime rebundled by a third party.  What it offers
+# instead is fetching the official one on request.
+# ---------------------------------------------------------------------------
+
+# Node's own naming, which is not uname's.
+node_arch() {
+    case "$(uname -m)" in
+        arm64) echo "arm64" ;;
+        x86_64) echo "x64" ;;
+        *) return 1 ;;
+    esac
+}
+
+expected_node_sha256() {
+    if [ -n "$NODE_SHA_OVERRIDE" ]; then echo "$NODE_SHA_OVERRIDE"; return 0; fi
+    case "$1" in
+        arm64) echo "$MANAGED_NODE_SHA256_ARM64" ;;
+        x64) echo "$MANAGED_NODE_SHA256_X64" ;;
+        *) return 1 ;;
+    esac
+}
+
+managed_node_bin() { echo "$RUNTIME_NODE_DIR/bin/node"; }
+# `npm install --prefix <dir> <pkg>` is a *local* install, so the package lands in
+# <dir>/node_modules and its bin link in <dir>/node_modules/.bin -- not the
+# <dir>/lib/node_modules + <dir>/bin layout that a global install produces.
+# Verified against a real install; assuming the global shape here is what made an
+# earlier version report success and then fail to find dsh.
+managed_dsh_entry() { echo "$RUNTIME_NPM_DIR/node_modules/.bin/dsh"; }
+
+managed_node_ready() { [ -x "$(managed_node_bin)" ]; }
+managed_dsh_ready() { [ -f "$(managed_dsh_entry)" ]; }
+
+runtime_status() {
+    local arch node_v dsh_v size
+    arch=$(node_arch 2>/dev/null || echo "unsupported")
+    echo "runtime dir   $RUNTIME_DIR"
+    echo "architecture  $arch"
+    if [ -d "$RUNTIME_DIR" ]; then
+        size=$(du -sh "$RUNTIME_DIR" 2>/dev/null | awk '{print $1}')
+        echo "disk usage    ${size:-unknown}"
+    fi
+    if managed_node_ready; then
+        node_v=$("$(managed_node_bin)" --version 2>/dev/null || echo "unreadable")
+        echo "node          $node_v (managed)"
+    else
+        echo "node          not installed (pinned: $MANAGED_NODE_VERSION)"
+    fi
+    if managed_dsh_ready; then
+        dsh_v=$(installed_dsh_version_at "$(managed_dsh_entry)" 2>/dev/null || echo "unreadable")
+        echo "dsh           $dsh_v (managed)"
+    else
+        echo "dsh           not installed"
+    fi
+    # What would actually be used, and from where. Labelling these "system" would
+    # be wrong: resolution falls back to the managed copy, so the same line can
+    # name either one.
+    echo
+    local rn rd
+    rn=$(resolve_node 2>/dev/null || true)
+    rd=$(resolve_dsh 2>/dev/null || true)
+    echo "resolved node ${rn:-none} $(runtime_origin "$rn")"
+    echo "resolved dsh  ${rd:-none} $(runtime_origin "$rd")"
+    managed_node_ready && managed_dsh_ready
+}
+
+# Is this path inside our managed runtime, or the user's own?
+runtime_origin() {
+    [ -n "$1" ] || return 0
+    case "$1" in
+        "$RUNTIME_DIR"/*) echo "(managed)" ;;
+        *) echo "(your own)" ;;
+    esac
+}
+
+# Fetch, verify, then unpack -- in that order, and never unpack something that
+# failed verification.
+install_managed_node() {
+    local arch url want got tmp
+    arch=$(node_arch) || { echo "$PROG: unsupported architecture $(uname -m)" >&2; return 1; }
+    want=$(expected_node_sha256 "$arch") || return 1
+    url="$NODE_DIST_BASE/$MANAGED_NODE_VERSION/node-$MANAGED_NODE_VERSION-darwin-$arch.tar.gz"
+
+    if managed_node_ready; then
+        local have
+        have=$("$(managed_node_bin)" --version 2>/dev/null || true)
+        if [ "$have" = "$MANAGED_NODE_VERSION" ]; then
+            log "node $MANAGED_NODE_VERSION already installed"
+            return 0
+        fi
+        log "replacing managed node $have with $MANAGED_NODE_VERSION"
+    fi
+
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/dsh-node.XXXXXX") || return 1
+    log "downloading $url"
+    if ! curl -fsSL --proto '=https,http' --max-time 900 -o "$tmp/node.tar.gz" "$url"; then
+        rm -rf "$tmp"
+        echo "$PROG: 下载 Node.js 失败。请检查网络连接，或自行安装 Node.js 22+ 后重试。" >&2
+        return 1
+    fi
+
+    got=$(shasum -a 256 "$tmp/node.tar.gz" | awk '{print $1}')
+    if [ "$got" != "$want" ]; then
+        rm -rf "$tmp"
+        echo "$PROG: Node.js 校验和不匹配，已丢弃下载内容且未解压。" >&2
+        echo "  期望 $want" >&2
+        echo "  实际 $got" >&2
+        echo "  这可能是下载损坏，也可能是内容被替换过。" >&2
+        return 1
+    fi
+    log "checksum verified"
+
+    # Unpack beside the target, then swap: an interrupted unpack must not leave a
+    # half-written runtime that later looks installed.
+    if ! tar -xzf "$tmp/node.tar.gz" -C "$tmp"; then
+        rm -rf "$tmp"
+        echo "$PROG: 解压 Node.js 失败" >&2
+        return 1
+    fi
+    local unpacked
+    unpacked="$tmp/node-$MANAGED_NODE_VERSION-darwin-$arch"
+    [ -x "$unpacked/bin/node" ] || {
+        rm -rf "$tmp"
+        echo "$PROG: 解压后的目录里没有 bin/node" >&2
+        return 1
+    }
+    mkdir -p "$RUNTIME_DIR" || { rm -rf "$tmp"; return 1; }
+    rm -rf "$RUNTIME_NODE_DIR.old"
+    [ -d "$RUNTIME_NODE_DIR" ] && mv "$RUNTIME_NODE_DIR" "$RUNTIME_NODE_DIR.old"
+    mv "$unpacked" "$RUNTIME_NODE_DIR"
+    rm -rf "$RUNTIME_NODE_DIR.old" "$tmp"
+    # 700: the runtime is executed by this user only, and nothing else should be
+    # able to drop a binary into it.
+    chmod 700 "$RUNTIME_DIR"
+    log "node installed: $("$(managed_node_bin)" --version)"
+}
+
+# npm verifies registry integrity hashes itself, so this leans on that rather
+# than reimplementing it.
+install_managed_dsh() {
+    local node_bin npm_cli
+    node_bin=$(managed_node_bin)
+    [ -x "$node_bin" ] || { echo "$PROG: 请先安装托管的 Node.js" >&2; return 1; }
+    npm_cli="$RUNTIME_NODE_DIR/lib/node_modules/npm/bin/npm-cli.js"
+    [ -f "$npm_cli" ] || { echo "$PROG: 托管的 Node.js 里找不到 npm" >&2; return 1; }
+
+    mkdir -p "$RUNTIME_NPM_DIR" || return 1
+    log "installing $MANAGED_DSH_SPEC"
+    # --prefix keeps it inside our directory; the global npm prefix and the
+    # user's own node_modules are left alone.
+    # dsh pulls in well over a hundred packages; a real install was measured at
+    # about seven minutes. The fetch timeout and retries are npm's own, which is
+    # simpler and more reliable than wrapping this in a watchdog of our own.
+    if ! ( cd "$RUNTIME_DIR" && env PATH="$RUNTIME_NODE_DIR/bin:$PATH" \
+            "$node_bin" "$npm_cli" install --silent --no-fund --no-audit \
+            --fetch-timeout=120000 --fetch-retries=2 \
+            --prefix "$RUNTIME_NPM_DIR" "$MANAGED_DSH_SPEC" ); then
+        echo "$PROG: 安装 dsh 失败。请检查网络连接后重试。" >&2
+        return 1
+    fi
+    managed_dsh_ready || { echo "$PROG: 安装后仍找不到 dsh 入口" >&2; return 1; }
+    log "dsh installed: $(installed_dsh_version_at "$(managed_dsh_entry)" 2>/dev/null || echo unknown)"
+}
+
+runtime_install() {
+    install_managed_node || return 1
+    install_managed_dsh || return 1
+    printf '{\n  "node": "%s",\n  "dshSpec": "%s",\n  "installedAt": "%s"\n}\n' \
+        "$MANAGED_NODE_VERSION" "$MANAGED_DSH_SPEC" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        > "$RUNTIME_MANIFEST"
+    log "managed runtime ready at $RUNTIME_DIR"
+}
+
+runtime_uninstall() {
+    if [ ! -d "$RUNTIME_DIR" ]; then
+        log "no managed runtime at $RUNTIME_DIR"
+        return 0
+    fi
+    rm -rf "$RUNTIME_DIR"
+    log "removed $RUNTIME_DIR"
+    log "your DSH data was not touched; sessions and credentials stay in $EFFECTIVE_DSH_HOME"
+}
+
+# Does this node exist and satisfy a minimum major version?  A minimum of 0 means
+# "any", which is the stock backend: upstream declares no engines field, so
+# inventing a floor there could reject a setup that works.
+node_meets() { # path, min-major
+    [ -n "$1" ] && [ -x "$1" ] || return 1
+    [ "${2:-0}" -eq 0 ] && return 0
+    local major
+    major=$(node_major "$1" 2>/dev/null) || return 1
+    [ -n "$major" ] || return 1
+    [ "$major" -ge "$2" ]
+}
+
+# Candidate order: an explicit --node, then the cache, then the user's own
+# installs, then our managed copy.  The user's node comes first because it is the
+# one they maintain; ours is a fallback, not a takeover.  The minimum version is
+# part of the search rather than a check afterwards, so that a too-old system node
+# does not shadow a managed one that would do.
+resolve_node() { # [min-major]
+    local min="${1:-0}" cached found cand
     if [ -n "$NODE_BIN_OVERRIDE" ]; then
         [ -x "$NODE_BIN_OVERRIDE" ] || { echo "$PROG: --node binary not executable: $NODE_BIN_OVERRIDE" >&2; return 1; }
+        # An explicit path is honoured -- but not past a hard requirement. The mfw
+        # backend's node >= 22 comes from its engines field, so an older one does
+        # not "work anyway": it fails later and less legibly. Say so here instead.
+        if ! node_meets "$NODE_BIN_OVERRIDE" "$min"; then
+            echo "$PROG: dsh-mfw 需要 Node.js >= ${min}，而 --node 指定的是 v$(node_major "$NODE_BIN_OVERRIDE" 2>/dev/null || echo '?')（${NODE_BIN_OVERRIDE}）。" >&2
+            echo "      请指定一个更新的 node，或让本应用取一份：launcher runtime install" >&2
+            return 1
+        fi
         echo "$NODE_BIN_OVERRIDE"; return 0
     fi
     if [ -f "$NODE_CACHE" ]; then
-        local cached; cached=$(cat "$NODE_CACHE" 2>/dev/null)
-        if [ -n "$cached" ] && [ -x "$cached" ]; then
-            echo "$cached"; return 0
-        fi
+        cached=$(cat "$NODE_CACHE" 2>/dev/null)
+        if node_meets "$cached" "$min"; then echo "$cached"; return 0; fi
     fi
     export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-    local found
-    found=$(command -v node 2>/dev/null)
+    found=""
+    cand=$(command -v node 2>/dev/null)
+    node_meets "$cand" "$min" && found="$cand"
     if [ -z "$found" ]; then
-        found=$(ls -t "$HOME"/.nvm/versions/node/*/bin/node \
-                    "$HOME"/.volta/bin/node \
-                    "$HOME"/.fnm/*/bin/node \
-                    "$HOME"/.local/bin/node \
-                    /opt/homebrew/bin/node \
-                    /usr/local/bin/node 2>/dev/null | head -1)
+        # `ls -t` on purpose, not a glob: the order matters here -- the most
+        # recently installed node is the one most likely to be the one the user
+        # wants, and a glob cannot sort by mtime. These are toolchain install
+        # paths, so the whitespace SC2045 warns about does not arise.
+        # shellcheck disable=SC2045
+        for cand in $(ls -t "$HOME"/.nvm/versions/node/*/bin/node \
+                          "$HOME"/.volta/bin/node \
+                          "$HOME"/.fnm/*/bin/node \
+                          "$HOME"/.local/bin/node \
+                          /opt/homebrew/bin/node \
+                          /usr/local/bin/node 2>/dev/null); do
+            node_meets "$cand" "$min" && { found="$cand"; break; }
+        done
+    fi
+    if [ -z "$found" ] && node_meets "$(managed_node_bin)" "$min"; then
+        found=$(managed_node_bin)
     fi
     if [ -z "$found" ]; then
-        echo "$PROG: cannot find a Node.js runtime. Install Node.js or pass --node <path>" >&2
+        if [ "$min" -gt 0 ]; then
+            echo "$PROG: 找不到 Node.js >= ${min}。可以自行安装，或让本应用取一份私有副本：" >&2
+        else
+            echo "$PROG: 找不到 Node.js 运行时。可以自行安装，或让本应用取一份私有副本：" >&2
+        fi
+        echo "      launcher runtime install" >&2
+        echo "      也可以用 --node <path> 指定" >&2
         return 1
     fi
     mkdir -p "$STATE_DIR" 2>/dev/null
@@ -535,17 +822,23 @@ start_server() {
 先停掉它再来，或者换一个端口。"
         return 1
     fi
-    local node_bin child_pathv entry major
+    local node_bin child_pathv entry min_node=0
     local args=()
 
-    if ! node_bin=$(resolve_node); then
-        start_fail "找不到 Node.js 运行时。请安装 Node.js 或用 --node 指定路径"
+    # dsh-mfw boots dsh with spawn(process.execPath), so the node picked here is
+    # also the node dsh runs on -- and it declares node >= 22.  The floor is part
+    # of the search rather than a check afterwards: resolving first and rejecting
+    # second would let a too-old system node shadow a managed one that qualifies.
+    [ "$BACKEND" = "mfw" ] && min_node="$MFW_MIN_NODE"
+    if ! node_bin=$(resolve_node "$min_node" 2>"$LOG_DIR/node-resolve.err"); then
+        start_fail "$(cat "$LOG_DIR/node-resolve.err" 2>/dev/null)"
+        rm -f "$LOG_DIR/node-resolve.err"
         return 1
     fi
+    rm -f "$LOG_DIR/node-resolve.err"
     # pnpm and corepack live next to the *real* node, so the child's PATH is
     # built from the resolved symlink target, not from where the symlink sits.
     child_pathv=$(child_path "$node_bin")
-    major=$(node_major "$node_bin" 2>/dev/null)
 
     if [ "$BACKEND" = "mfw" ]; then
         if ! entry=$(resolve_mfw); then
@@ -553,12 +846,6 @@ start_server() {
             return 1
         fi
         version_skew_guard "$entry" || return 1
-        # dsh-mfw boots dsh with spawn(process.execPath), so the node we pick
-        # here is also the node dsh runs on -- and it declares node >= 22.
-        if [ -n "$major" ] && [ "$major" -lt "$MFW_MIN_NODE" ]; then
-            start_fail "dsh-mfw 需要 Node.js >= ${MFW_MIN_NODE}，当前是 v${major}（${node_bin}）。请升级 Node.js 或用 --node 指定一个更新的"
-            return 1
-        fi
         local pm; pm=$(pnpm_locate "$child_pathv")
         if [ -z "$pm" ]; then
             start_fail "dsh-mfw 需要 pnpm（或 corepack）来准备运行时，但在 $(dirname "$node_bin") 及常规目录里都找不到。
@@ -711,6 +998,14 @@ if [ "${DSH_LAUNCHER_LIB:-0}" = "1" ]; then
 fi
 
 case "$CMD" in
+    runtime)
+        case "$SUBCMD" in
+            status)    runtime_status; exit $? ;;
+            install)   runtime_install ;;
+            uninstall) runtime_uninstall ;;
+            *) echo "$PROG: unknown runtime subcommand: $SUBCMD" >&2; exit 2 ;;
+        esac
+        ;;
     status)
         status_of; exit $?
         ;;

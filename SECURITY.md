@@ -68,12 +68,32 @@ folder**. That is a real change in what the agent may touch. Accordingly:
 Details, including how the patched sandbox resolves the member set, are in the
 [dsh-mfw](https://github.com/Boy-Grid/dsh-multi-folder-workspace) repository.
 
-### Runtimes are not bundled or downloaded
+### Runtimes are not bundled, and are only fetched on request
 
-The app neither ships nor fetches Node.js or dsh. It resolves what you already
-installed and executes it. Nothing is downloaded at runtime by this app; the
-`mfw` backend's first run does install a patched runtime, but that work is done
-by `dsh-mfw` from npm, under your own account.
+The app ships neither Node.js nor dsh. By default it resolves what you already
+installed and executes that.
+
+It can also fetch them, but only when asked — either by accepting the offer shown
+when nothing is found, or by running `launcher runtime install`. That path
+downloads and then executes code, so it is worth being precise about:
+
+- Node.js comes from `https://nodejs.org/dist` and is verified against a
+  **SHA-256 checksum pinned in the launcher script** before it is unpacked. Taking
+  the checksum from the same server as the download would only prove the two
+  agree; pinning it means a compromised mirror — or a compromised nodejs.org —
+  still cannot get code past the script. On a mismatch the download is discarded
+  and nothing is unpacked. Updating the pinned Node version means updating the
+  checksums with it, which `tests/t-09-runtime.sh` guards.
+- dsh is installed with npm, which verifies registry integrity hashes itself.
+  The install is confined to the app's own directory with `--prefix`; the global
+  npm prefix and your own `node_modules` are not touched.
+- The runtime directory is created with mode `700`, so nothing else running as
+  another user can drop a binary into a directory this app executes from.
+- `launcher runtime uninstall` removes it. Sessions and credentials live in
+  `$DSH_HOME` and are not touched.
+
+The `mfw` backend additionally installs a patched dsh runtime on first use; that
+work is done by `dsh-mfw` from npm, under your own account.
 
 ### Code signing
 
@@ -105,6 +125,7 @@ until the machine can reach Apple once.
 | What | Where |
 |---|---|
 | pid file, resolved paths, logs | `~/Library/Application Support/DSH Desktop/` (plus `mfw/`, `ports/<port>/`) |
+| managed runtime, if fetched | `~/Library/Application Support/DSH Desktop/runtime/` (mode `700`, ~470 MB) |
 | per-tab web storage | `~/Library/WebKit/io.github.boy-grid.dsh-desktop/WebsiteDataStore/<uuid>/` |
 | settings, tab list | app preferences (`io.github.boy-grid.dsh-desktop`) |
 | sessions and credentials | `$DSH_HOME`, `~/.dsh` by default — owned by dsh, not by this app |

@@ -1599,6 +1599,13 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                     let detail = out.trimmingCharacters(in: .whitespacesAndNewlines)
                     DispatchQueue.main.async {
                         let alert = NSAlert()
+                        // A missing runtime is the one failure this app can do
+                        // something about, so it gets an offer rather than just a
+                        // verdict. Everything else only gets the reason.
+                        if self.looksLikeMissingRuntime(detail) {
+                            self.offerRuntimeInstall(reason: detail)
+                            return
+                        }
                         alert.messageText = "DeepSeek Harness Web UI 启动失败"
                         alert.informativeText = detail.isEmpty ? "未知错误，详见日志" : detail
                         alert.addButton(withTitle: "好")
@@ -1608,6 +1615,76 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                 }
             }
             DispatchQueue.main.async { self.showWindow() }
+        }
+    }
+
+    // MARK: - managed runtime
+    //
+    // This app ships neither Node.js nor dsh -- the disk image stays around a
+    // megabyte, and nobody has to trust a runtime rebundled by a third party.
+    // What it can do is fetch the official ones on request, which is what the
+    // launcher's `runtime install` does.
+
+    /// The launcher names the install command in exactly the failures a fetch
+    /// would fix, so that string is the signal rather than a guess at the prose.
+    private func looksLikeMissingRuntime(_ detail: String) -> Bool {
+        detail.contains("runtime install")
+    }
+
+    private func offerRuntimeInstall(reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "缺少运行时"
+        alert.informativeText = """
+            \(reason.isEmpty ? "找不到 Node.js 或 dsh。" : reason)
+
+            本应用不捆绑运行时，但可以为你下载一份放在它自己的目录里，\
+            不会影响你系统里已有的 Node.js 或 dsh。
+
+            Node.js 取自官方发布，解压前会校验内容；dsh 用 npm 安装。实测：下载约 \
+            50 MB，安装完成后**占用约 470 MB**（dsh 有一百多个依赖包），耗时 5–10 \
+            分钟，取决于网络。随时可以在偏好设置里移除。
+            """
+        alert.addButton(withTitle: "下载并安装")
+        alert.addButton(withTitle: "稍后")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        runRuntimeInstall()
+    }
+
+    /// Runs the install with a progress sheet: it downloads ~50 MB and then runs
+    /// npm, which is far too long to leave the UI looking idle.
+    private func runRuntimeInstall() {
+        let panel = NSAlert()
+        panel.messageText = "正在安装运行时"
+        panel.informativeText = "正在下载 Node.js 并安装 dsh，请稍候…"
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.startAnimation(nil)
+        spinner.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
+        panel.accessoryView = spinner
+        // No buttons that would dismiss it into a lie: the work continues either
+        // way, so the sheet is closed from the completion below.
+        let window = panel.window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (code, out) = self.runScript("runtime install")
+            self.log("runtime install exit=\(code)")
+            DispatchQueue.main.async {
+                window.orderOut(nil)
+                guard code == 0 else {
+                    let failed = NSAlert()
+                    failed.messageText = "运行时安装失败"
+                    failed.informativeText = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                        + "\n\n也可以自行安装 Node.js 22+ 与 dsh：npm install -g @deepseek-ai/dsh"
+                    failed.addButton(withTitle: "好")
+                    failed.runModal()
+                    return
+                }
+                self.log("runtime installed; retrying start")
+                self.ensureAndOpen()
+            }
         }
     }
 

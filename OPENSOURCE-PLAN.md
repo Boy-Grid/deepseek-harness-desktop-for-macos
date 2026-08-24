@@ -37,6 +37,12 @@ and build with bundle verification), both on macOS.
 **Documentation** — English README with a Chinese translation, CONTRIBUTING,
 SECURITY, CHANGELOG, and a short copy inside the app bundle.
 
+**Managed runtime** — nothing is bundled, and the disk image stays about a
+megabyte. When no Node.js or dsh is found the app offers to fetch them into its
+own directory (`launcher runtime install|status|uninstall`); Node's tarball is
+verified against a checksum pinned in the launcher before anything is unpacked,
+and a runtime the user installed themselves always takes precedence.
+
 **Distribution** — universal binary (Apple Silicon and Intel), Developer ID
 signature with hardened runtime and secure timestamp, notarized and stapled, DMG
 plus SHA256SUMS from one command; a release workflow that verifies the tag and
@@ -59,7 +65,8 @@ opens a draft.
 
 | Item | Notes |
 |---|---|
-| Managed runtime | Install Node.js and dsh on demand instead of requiring them beforehand, with a first-run wizard, offline degradation and a `launcher dsh` subcommand. The largest remaining piece. Note the disk cost: an app-managed node, plus dsh, plus mfw's own ~300 MB tree. |
+| Update the managed runtime in place | `runtime install` replaces Node when the pinned version changes, but there is no `runtime update` that also refreshes dsh, and no notice when a newer dsh exists. |
+| Progress detail while fetching | The install shows a spinner. It knows neither how far the download has got nor which npm phase it is in, and it runs for 5–10 minutes. |
 | Native multi-select folder panel | dsh-mfw disables the native directory picker and uses an in-page browse UI. A native `NSOpenPanel` is the one thing this app could offer that a browser cannot — but it needs a host-side plugin and local IPC to reach the `onPicked(paths[])` contract. |
 
 ### Release and verification

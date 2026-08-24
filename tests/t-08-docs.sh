@@ -112,7 +112,12 @@ assert_contains "$readme" "macOS 14" "README 写明最低系统版本"
 # Matched on a short fragment on purpose: the full sentence wraps, and an
 # assertion that depends on where a line happens to break is a trap for the next
 # person to reflow a paragraph.
-assert_contains "$readme" "neither bundles" "README 写明不捆绑不代装运行时"
+assert_contains "$readme" "bundles neither" "README 写明两个运行时都不捆绑"
+# The managed runtime downloads and executes code, so its cost and its
+# verification must both be stated where a user will see them.
+assert_contains "$readme" "always wins" "README 写明用户自己的运行时优先"
+assert_contains "$readme" "470 MB" "README 如实写出磁盘占用"
+assert_contains "$readme" "pinned in the launcher" "README 说明校验和是固定在脚本里的"
 
 # --- the icon's provenance has to stay attributed --------------------------
 notices=$(cat THIRD_PARTY_NOTICES.md)

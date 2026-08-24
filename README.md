@@ -36,11 +36,14 @@ storage. This app makes the harness a normal desktop application:
 ## Requirements
 
 - macOS 14 or later (the per-tab persistent stores use an API introduced there)
-- Node.js, and DeepSeek Harness installed yourself — this app **neither bundles
-  nor downloads a runtime**:
+- Node.js and DeepSeek Harness. The app **bundles neither** — the disk image is
+  about a megabyte. Install them yourself:
   ```sh
   npm install -g @deepseek-ai/dsh
   ```
+  Or let the app fetch a private copy when it finds none (see
+  [Managed runtime](#managed-runtime) — it is opt-in, and a runtime you installed
+  yourself always wins).
 - For the multi-folder backend only: Node.js 22+ and pnpm 11+ (or corepack)
 
 ## Install
@@ -105,6 +108,41 @@ Signing happens on the maintainer's machine, not in CI. The Developer ID private
 key would otherwise have to live in repository secrets, which trades a much wider
 blast radius for saving one command a few times a year. The release workflow
 verifies the tag and opens a draft; the image is uploaded to it locally.
+
+## Managed runtime
+
+Nothing is bundled, and nothing is downloaded behind your back. When no Node.js
+or dsh can be found, the app offers to fetch a copy into its own directory; you
+can also drive it directly:
+
+```sh
+"$L" runtime status      # what was fetched, and which node/dsh would be used
+"$L" runtime install     # fetch Node.js and dsh
+"$L" runtime uninstall   # remove them; DSH data is untouched
+```
+
+**A runtime you installed yourself always wins.** The managed copy is a fallback,
+never a takeover — with one exception worth knowing: the mfw backend requires
+Node 22, so if your own node is older, the managed one is used for that backend
+rather than failing. The minimum version is part of the search, not a check after
+it, precisely so a too-old node cannot shadow one that would work.
+
+What it costs, measured rather than estimated:
+
+| | |
+|---|---|
+| Download | ~50 MB (the official Node tarball) |
+| On disk after install | **~470 MB** — Node unpacks to ~100 MB, and dsh pulls in over a hundred packages |
+| Time | 5–10 minutes, mostly npm |
+
+Node's tarball is verified against a **checksum pinned in the launcher script**
+before anything is unpacked. Taking the checksum from the same server as the
+download would only prove the two agree; pinning it means a compromised mirror
+still cannot get code past the script. A mismatch discards the download and
+refuses to unpack it.
+
+The runtime directory is created `700` and lives outside any per-port state, so
+one copy serves every backend and port.
 
 ## Two backends
 

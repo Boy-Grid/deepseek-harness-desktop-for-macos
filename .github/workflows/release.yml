@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to prepare a release for"
+        required: true
+
+# Signing and notarization deliberately do NOT happen here.
+#
+# The Developer ID private key lives in one keychain on one machine. Putting it
+# into repository secrets would widen the blast radius of a leaked token from
+# "someone opens a PR" to "someone ships a signed build under my identity", in
+# exchange for saving one local command a few times a year. So this workflow
+# verifies the tag and opens a draft release; the signed, notarized disk image is
+# produced locally with `scripts/make-dmg.sh` and uploaded to that draft.
+jobs:
+  verify:
+    name: Verify the tagged commit
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: Tests
+        run: bash tests/run.sh
+
+      # An unsigned build, purely to prove the tagged source compiles and the
+      # bundle assembles. The artifact that ships is built locally.
+      - name: Build
+        run: ./build.sh --output "$RUNNER_TEMP/DSH Desktop.app"
+
+      # A tag that disagrees with the version inside the bundle produces a
+      # release whose assets are named after a different version than the tag.
+      - name: Tag must match CFBundleShortVersionString
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          [ "${{ github.event_name }}" != "workflow_dispatch" ] || tag="${{ inputs.tag }}"
+          plist_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+          echo "tag=$tag  Info.plist=$plist_version"
+          test "$tag" = "v$plist_version"
+
+  draft:
+    name: Open a draft release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create or update the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          [ "${{ github.event_name }}" != "workflow_dispatch" ] || tag="${{ inputs.tag }}"
+
+          notes=$(cat <<'EOF'
+          Requires macOS 14 or later. Universal (Apple Silicon and Intel).
+
+          DeepSeek Harness is **not** bundled — install it yourself:
+
+              npm install -g @deepseek-ai/dsh
+
+          The disk image is signed with a Developer ID and notarized by Apple, so
+          it opens without a Gatekeeper warning. Verify what you downloaded:
+
+              shasum -a 256 -c SHA256SUMS
+              spctl --assess --type open --context context:primary-signature -v <dmg>
+
+          See the README for the two backends (stock dsh, or multi-folder
+          workspaces) and SECURITY.md for the security model.
+          EOF
+          )
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --draft --notes "$notes"
+          else
+            gh release create "$tag" --draft --title "DSH Desktop $tag" --notes "$notes"
+          fi
+
+          echo "Draft ready. Upload the signed image locally:"
+          echo "  ./scripts/make-dmg.sh"
+          echo "  gh release upload $tag dist/DSH-Desktop-*.dmg dist/SHA256SUMS"

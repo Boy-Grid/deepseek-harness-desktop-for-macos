@@ -61,9 +61,35 @@ the build verifies the binary's `minos` matches it. Without an explicit
 the app then refuses to launch on anything older than the machine it was built
 on — however generous the plist looks.
 
-Releases are not signed with a Developer ID yet, so a downloaded build needs the
-usual right-click → Open on first launch. A locally built one is signed ad-hoc
-and starts normally.
+A default build is ad-hoc signed, which is all a local build needs.
+
+### Releasing
+
+`scripts/make-dmg.sh` goes from source to a disk image that opens without a
+Gatekeeper warning: a universal binary (Apple Silicon and Intel) signed with a
+Developer ID, hardened runtime and a secure timestamp, notarized by Apple, and
+with the ticket stapled into the image.
+
+```sh
+./scripts/make-dmg.sh                  # build --release, package, notarize, staple
+./scripts/make-dmg.sh --skip-notarize  # signed image only, for a dry run
+```
+
+Notarization credentials are read from the keychain, so they never appear in a
+command line or a file in the repository. Create them once:
+
+```sh
+xcrun notarytool store-credentials "dsh-desktop-notary" \
+  --key <AuthKey_XXXXXXXXXX.p8> --key-id <Key ID> --issuer <Issuer ID>
+```
+
+Only an App Store Connect **Team Key** works for notarization; an Individual Key
+is rejected with a 401 that does not explain why.
+
+Signing happens on the maintainer's machine, not in CI. The Developer ID private
+key would otherwise have to live in repository secrets, which trades a much wider
+blast radius for saving one command a few times a year. The release workflow
+verifies the tag and opens a draft; the image is uploaded to it locally.
 
 ## Two backends
 

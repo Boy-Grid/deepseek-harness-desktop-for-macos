@@ -316,7 +316,7 @@ deepseek-harness-desktop-for-macos/
 | **M1 双后端** | `launcher` 后端抽象（stock/mfw）、node realpath 注入 PATH、Node ≥ 22 校验、两段式 provision、版本错开守卫、DSH home 自定义、per-(后端,端口) 状态目录、owner 判定改完整子树 | 1–2 天 |
 | **M2 工程化与 CI** | ✅ 测试套件（7 文件 / 176 断言，覆盖"绝不杀他人进程"、归属判定、后端与路径解析、mfw 守卫、启动全程）+ shellcheck + 自定义 lint + GitHub Actions 两个 job（已在真实 runner 上跑通）+ 英文主 README 与中文 README.zh + CONTRIBUTING + SECURITY。⏳ 剩 CODE_OF_CONDUCT、CHANGELOG | 1–2 天 |
 | **M3 应用正规化** | ✅ 偏好设置（后端切换 + 首次询问 + DSH home）、每标签持久存储 + 标签重命名、退出改异步（不再卡 UI）、部署目标与 plist 对齐。⏳ 剩 `LauncherAgent.swift` 继续拆模块（已分出 `main`/`Preferences`/`TabStore`）、卸载入口、日志轮转 | 2–3 天 |
-| **M4 分发** | Apple Developer 账号、Developer ID 签名 + 公证 + 装订、通用二进制、DMG 制作、SHA256SUMS、Release 自动化、检查更新（后期 Sparkle） | 3–5 天（含账号审批等待） |
+| **M4 分发** | ✅ Developer ID 签名 + hardened runtime + 时间戳、通用二进制（arm64 + x86_64）、DMG 打包、Apple 公证 + 装订、SHA256SUMS、`scripts/make-dmg.sh` 一条命令跑完、Release workflow（校验 tag + 开 draft）。⏳ 剩发首个 Release、检查更新（后期 Sparkle） | 3–5 天 |
 | **M5 托管运行时** | 一键在线安装 node + dsh/dsh-mfw、首次运行向导、断网降级、`launcher dsh` 子命令、磁盘占用如实告知（双层缓存 350 MB+） | 3–5 天 |
 | **M6 社区** | 模板、Discussions、FAQ、发布 checklist 固化 | 1–2 天 |
 
@@ -342,6 +342,16 @@ deepseek-harness-desktop-for-macos/
 | **WebView 存储** | 改**持久**，且**每个标签一个独立的持久 store**（按标签 UUID 标识）。不能共享一个：DSH web UI 把当前会话记在 localStorage 的 `dsh.sessions.current` 并在加载时读回，且 UI 没有 URL 路由——共享一个 store 会让所有标签收敛到同一个会话，多标签并行就没了。附带好处是重启后每个标签回到各自的会话。关闭标签即删除其存储，崩溃遗留的孤立存储下次启动清理。随之**恢复标签手动重命名**（手动名优先于自动标题，并随标签持久化） |
 | **最低系统版本** | **macOS 14.0**。带标识的 `WKWebsiteDataStore` 是 14 引入的，而代码本来就在用 `NSApplication.activate()`（也是 14+）。此前 plist 写 12.0 却从未被强制，属于失真的承诺 |
 | **首个版本号** | `0.1.0`（此前 `Info.plist` 写着 1.0.0 但一次都没发过）。与 dsh-mfw 的节奏对齐，也如实传达"上游是 dev preview" |
+
+### ✅ M4 实测确认的几件事
+
+| 项 | 结论 |
+|---|---|
+| **hardened runtime 是否妨碍我们 spawn node** | **不妨碍。** 这是发布前唯一"没实测就不敢断言"的点。实测：给 app 打上 quarantine 属性模拟下载，Gatekeeper 判 `accepted / Notarized Developer ID`，运行后 `LauncherAgent → launcher → node(dsh-mfw) → node(dsh)` 整条链路正常，UI 返回 200。**不需要任何额外 entitlement**——hardened runtime 约束的是进程自身（加载 dylib、JIT），而子进程有自己的签名策略 |
+| **Team ID** | `D2U29Q6P4C`（取自 Developer ID 证书）。注意 Apple Development 证书括号里是另一串，不是 Team ID |
+| **公证的 Team Key 限制** | App Store Connect 的 **Individual Key 不能用于公证**，会拿到不解释原因的 401；必须用 Team Key |
+| **`notarytool submit --wait` 会挂死** | 实测一次：Apple 侧早已 `Accepted`，本地 `--wait` 仍挂到 25 分钟超时，且它本该打印的 submission id 也随之丢失、无法续做。改为 submit 拿 id + 带上限轮询 `notarytool info`，超时时打印 id 与恢复命令 |
+| **票据只装订到 DMG，不在 app 上** | 用户把 app 拖进 `/Applications` 后，首次启动走在线校验。联网时无感；完全离线可能被拦一次。已写进 SECURITY.md。要消掉需要多一轮公证（先 zip app → 公证 → 装订 app → 再打 DMG），代价是发布时间翻倍 |
 
 ### ❌ 试过又撤掉的
 

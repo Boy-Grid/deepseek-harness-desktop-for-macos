@@ -53,8 +53,32 @@ cd deepseek-harness-desktop-for-macos
 与之一致。不显式传 `-target` 的话，`swiftc` 会把**构建机**的系统版本写进二进制，于是
 这个包在任何比构建机更旧的系统上都起不来——而 plist 看起来还很宽容。
 
-目前还没有用 Developer ID 签名，所以下载来的构建首次打开需要右键 → 打开。本地自己
-构建的是 ad-hoc 签名，直接启动即可。
+默认构建是 ad-hoc 签名，本地跑够用了。
+
+### 发布
+
+`scripts/make-dmg.sh` 从源码一路做到「打开时不会被 Gatekeeper 拦」的磁盘映像：通用
+二进制（Apple Silicon 与 Intel）、Developer ID 签名、hardened runtime、安全时间戳、
+经 Apple 公证，并把票据装订进映像。
+
+```sh
+./scripts/make-dmg.sh                  # 构建 --release、打包、公证、装订
+./scripts/make-dmg.sh --skip-notarize  # 只出签名映像，用于试跑
+```
+
+公证凭据从钥匙串读，所以不会出现在命令行或仓库里的任何文件中。一次性配置：
+
+```sh
+xcrun notarytool store-credentials "dsh-desktop-notary" \
+  --key <AuthKey_XXXXXXXXXX.p8> --key-id <Key ID> --issuer <Issuer ID>
+```
+
+公证只认 App Store Connect 的 **Team Key**；用 Individual Key 会拿到一个不解释原因的
+401。
+
+签名在维护者本机做，不在 CI 里。否则 Developer ID 私钥就得放进仓库 secrets——为了一年
+省几次命令，把泄露后的影响面扩大得多。发布 workflow 只负责校验 tag 并开一个 draft，
+映像在本地上传上去。
 
 ## 两个后端
 

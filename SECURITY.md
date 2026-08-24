@@ -77,17 +77,28 @@ by `dsh-mfw` from npm, under your own account.
 
 ### Code signing
 
-Locally built bundles are signed ad-hoc. Releases are not yet signed with a
-Developer ID or notarized, so Gatekeeper will warn about an unidentified
-developer on a downloaded build. Verify what you run:
+Released disk images are signed with a Developer ID, built with the hardened
+runtime and a secure timestamp, notarized by Apple, and have the notarization
+ticket stapled into the image. A locally built bundle is ad-hoc signed, which is
+enough to run but is not something to distribute.
+
+Signing happens on the maintainer's machine. The Developer ID private key is not
+in repository secrets and CI cannot produce a signed build, so a compromised
+workflow token cannot ship anything under this identity.
+
+Verify a download before running it:
 
 ```sh
-codesign -dv --verbose=2 "/path/to/DSH Desktop.app"
-shasum -a 256 "/path/to/downloaded.dmg"
+shasum -a 256 -c SHA256SUMS
+spctl --assess --type open --context context:primary-signature -v <dmg>
+# expected: accepted / source=Notarized Developer ID
 ```
 
-Signing and notarization are planned; until then, building from source is the
-way to know what you have.
+One limitation worth stating: the notarization ticket is stapled to the disk
+image, not to the application inside it. Gatekeeper therefore checks the app's
+notarization online the first time it runs from `/Applications`. With a network
+connection this is invisible; entirely offline, a first launch may be refused
+until the machine can reach Apple once.
 
 ### Local data
 

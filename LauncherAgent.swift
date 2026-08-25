@@ -1924,6 +1924,49 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
+    /// A spinner, a headline and a line of explanation, in a window the user
+    /// cannot dismiss — the work behind it cannot be cancelled halfway, so
+    /// offering a button that suggests otherwise would be a lie.
+    private static func progressPanel(title: String, detail: String) -> NSWindow {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 108),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = "DSH Desktop"
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+
+        let headline = NSTextField(labelWithString: title)
+        headline.font = .systemFont(ofSize: 13, weight: .semibold)
+        let body = NSTextField(wrappingLabelWithString: detail)
+        body.font = .systemFont(ofSize: 11)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 280
+
+        let text = NSStackView(views: [headline, body])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 4
+        let row = NSStackView(views: [spinner, text])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 12
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSView()
+        root.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            row.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            row.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            row.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20),
+        ])
+        panel.contentView = root
+        root.layoutSubtreeIfNeeded()
+        panel.setContentSize(NSSize(width: 360, height: root.fittingSize.height))
+        return panel
+    }
+
     /// Pull one `key: value` line out of the launcher's report.
     private func field(_ key: String, in output: String) -> String? {
         for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -1984,18 +2027,11 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private func installUpdate(latest: String) {
         guard !updateInFlight else { return }
         updateInFlight = true
-        let progress = NSAlert()
-        progress.messageText = "正在下载 \(latest)"
-        progress.informativeText = "下载与校验完成后应用会退出并自动重新打开。"
-        let spinner = NSProgressIndicator()
-        spinner.style = .spinning
-        spinner.startAnimation(nil)
-        spinner.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
-        progress.accessoryView = spinner
-        // Shown without a button that could dismiss it while the child runs; the
-        // sheet is taken down from the completion handler below.
-        let window = progress.window
-        progress.layout()
+        // A plain panel rather than an NSAlert: an alert shown outside a modal
+        // session still draws its default button, and a button that looks
+        // clickable but does nothing is worse than no button.
+        let window = Self.progressPanel(title: "正在下载 \(latest)",
+                                        detail: "下载与校验完成后应用会退出并自动重新打开。")
         window.center()
         window.makeKeyAndOrderFront(nil)
 

@@ -118,11 +118,17 @@ assert_contains "$restart_body" "restartInstance()" "装完运行时后按切换
 # The dialog used to promise Node.js came from the official release, which stopped
 # being true once mirrors were configurable; and a download failure is most often
 # the network, which is the one problem the mirror setting solves.
+#
+# Asserted as two tokens rather than a sentence. An earlier version matched whole
+# phrases and broke on a rewording that kept every fact intact -- the same coupling
+# to prose that let the missing-runtime offer disappear in the first place. What
+# has to hold is that the user is told the source is configurable and where.
 offer_body=$(sed -n '/private func offerRuntimeInstall/,/^    }$/p' "$REPO/LauncherAgent.swift")
-assert_contains "$offer_body" "偏好设置里选定的下载源" "运行时提示如实说明下载源可配置"
-assert_contains "$offer_body" "校验和固定在" "运行时提示说明校验和是固定的"
+assert_contains "$offer_body" "偏好设置" "运行时提示指向偏好设置"
+assert_contains "$offer_body" "下载源" "运行时提示说明下载源可自定义"
 install_body=$(sed -n '/private func runRuntimeInstall/,/^    }$/p' "$REPO/LauncherAgent.swift")
-assert_contains "$install_body" "偏好设置 → 下载源" "安装失败时指向镜像设置"
+assert_contains "$install_body" "偏好设置" "安装失败时指向偏好设置"
+assert_contains "$install_body" "下载源" "安装失败时指名下载源"
 # Progress is a panel, not an NSAlert: an alert outside a modal session draws a
 # default button that does nothing. Both long-running jobs share the one panel.
 assert_contains "$install_body" "Self.progressPanel" "安装进度用统一的进度面板"

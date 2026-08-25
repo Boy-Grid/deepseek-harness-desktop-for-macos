@@ -177,9 +177,8 @@ enum NpmMirror: String, CaseIterable {
     /// against a checksum pinned in the launcher, so a substitution is caught,
     /// while npm verifies integrity hashes that the registry itself supplies.
     static let trustNote = """
-        换 Node.js 下载源不会降低安全性：期望的 SHA-256 固定写在 launcher 脚本里，\
-        镜像若给出别的内容会被拒绝。换 npm registry 则是一个信任选择——\
-        npm 校验的完整性哈希来自 registry 自身。请使用你信任的镜像。
+        切换 Node.js 下载源不会影响安全性；DSH Desktop 会校验下载得到的 Node.js 的哈希值。\
+        切换 npm registry 可能会影响安全性；npm 校验的完整性哈希来自 registry 自身。请使用你信任的镜像。
         """
 }
 
@@ -458,10 +457,9 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
 
         stack.addView(fieldRow(label: "受信任主机", field: trustedField,
                                value: Preferences.shared.trustedHosts.joined(separator: ", "),
-                               placeholder: "留空即可，例：dsh.local, box:3080",
+                               placeholder: "若无外部访问需求，请留空",
                                reset: #selector(resetTrusted)), in: .top)
-        stack.addView(bodyLabel("额外允许的 Host 头，逗号分隔。只在通过反向代理或另一个域名"
-                                + "访问时需要；它校验 Host 头以防 DNS 重绑定，不是访问控制。",
+        stack.addView(bodyLabel("额外允许的 Host 头，逗号分隔。请与「绑定地址」配合设置。",
                                 width: 420), in: .top)
 
         stack.addView(fieldRow(label: "端口", field: portField,
@@ -491,7 +489,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
                                placeholder: NpmMirror.npmjs.nodeDist ?? "",
                                reset: #selector(resetNodeMirror)), in: .top)
         stack.addView(bodyLabel("只影响本应用代为下载的运行时（固定版本的 Node.js 与托管的 dsh）。"
-                                + "多文件夹后端由 dsh-mfw 自己调用包管理器，跟随你的 npm 配置。",
+                                + "多文件夹后端行为由 dsh-mfw 控制，其跟随你的 npm 配置。",
                                 width: 420), in: .top)
         stack.addView(bodyLabel(NpmMirror.trustNote, width: 420), in: .top)
 
@@ -530,11 +528,11 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     private func updateExposureNote() {
         let host = Preferences.shared.bindHost
         if NetworkExposure.isLoopback(host) {
-            exposureNote.stringValue = "仅这台机器可以访问。改成 0.0.0.0 会让局域网内的设备也能访问。"
+            exposureNote.stringValue = "仅这台机器可以访问。"
             exposureNote.textColor = .secondaryLabelColor
         } else {
-            exposureNote.stringValue = "⚠︎ 已对外开放：能连到 \(host) 的设备都可以直接使用 DSH，"
-                + "而 DSH 没有任何认证。请只在完全信任的网络中保持这个设置。"
+            exposureNote.stringValue = "⚠︎ 已对外开放：可访达 \(host) 的设备都可以直接使用 DSH。"
+                + "请只在完全信任的网络中保持这个设置。"
             exposureNote.textColor = .systemRed
         }
     }
@@ -683,7 +681,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             portField.stringValue = Preferences.shared.port
             let alert = NSAlert()
             alert.messageText = "端口无效"
-            alert.informativeText = "「\(typed)」不是 1–65535 之间的端口号，设置未改动。"
+            alert.informativeText = "请使用 1–65535 之间的端口号。设置未改动。"
             alert.addButton(withTitle: "好")
             alert.runModal()
             return

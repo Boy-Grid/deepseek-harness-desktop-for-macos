@@ -1661,15 +1661,14 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let alert = NSAlert()
         alert.messageText = "缺少运行时"
         alert.informativeText = """
-            \(reason.isEmpty ? "找不到 Node.js 或 dsh。" : reason)
+            \(reason.isEmpty ? "未能找到可用的 Node.js 或 dsh。" : reason)
 
-            本应用不捆绑运行时，但可以为你下载一份放在它自己的目录里，\
-            不会影响你系统里已有的 Node.js 或 dsh。
+            DSH Desktop 不提供捆绑运行时。\
+            点击「下载并安装」以下载并安装一份单独存放的运行时；\
+            预计耗时 5-10 分钟，占用 470 MB 磁盘空间。
+            这不会影响系统里已有的 Node.js 或 dsh。
 
-            Node.js 来自偏好设置里选定的下载源（默认官方发布），期望的校验和固定在\
-            应用内，下载到别的内容会被拒绝且不解压；dsh 用 npm 安装。实测：下载约 \
-            50 MB，安装完成后**占用约 470 MB**（dsh 有一百多个依赖包），耗时 5–10 \
-            分钟，取决于网络。随时可以在偏好设置里移除。
+            你可以在偏好设置中自定义 Node.js 下载源和 npm registry。
             """
         alert.addButton(withTitle: "下载并安装")
         alert.addButton(withTitle: "稍后")
@@ -1702,9 +1701,8 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                     // mirror setting exists for — worth naming at the moment it
                     // would help rather than only in the README.
                     failed.informativeText = out.trimmingCharacters(in: .whitespacesAndNewlines)
-                        + "\n\n如果是下载不通，可以在「偏好设置 → 下载源」里换一个 npm / "
-                        + "Node.js 镜像后重试。\n也可以自行安装 Node.js 22+ 与 dsh："
-                        + "npm install -g @deepseek-ai/dsh"
+                        + "\n\n您可以尝试在偏好设置中自定义 Node.js 下载源和 npm registry 以解决连接问题；\n"
+                        + "亦可以自行安装 Node.js 22+ 和 DeepSeek Harness。"
                     failed.addButton(withTitle: "好")
                     failed.runModal()
                     return

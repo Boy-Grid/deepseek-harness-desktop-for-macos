@@ -1108,7 +1108,11 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     /// owner of that rule is what keeps `status` and `stop` looking at the same
     /// pid file after a backend switch.
     @discardableResult
-    private func runScript(_ cmd: String, backend: Backend? = nil) -> (Int32, String) {
+    /// Variadic, not a single string: `runScript("runtime install")` used to hand
+    /// the launcher one argv element containing a space, which it rejected as an
+    /// unknown argument. That went unnoticed for as long as the runtime offer
+    /// never appeared — so the command behind the button had never once run.
+    private func runScript(_ cmd: String..., backend: Backend? = nil) -> (Int32, String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: scriptPath)
         var args: [String] = []
@@ -1123,7 +1127,7 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         // Where a fetched runtime comes from. Passed on every subcommand so that
         // `runtime status` reports the same source `runtime install` would use.
         args += Preferences.shared.mirrorArguments
-        args += [cmd]
+        args += cmd
         p.arguments = args
         // A double-clicked app starts at "/", and an inherited "/" is a bad
         // working directory for anything: a relative write lands at the root of
@@ -1687,7 +1691,7 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
         DispatchQueue.global().async { [weak self] in
             guard let self else { return }
-            let (code, out) = self.runScript("runtime install")
+            let (code, out) = self.runScript("runtime", "install")
             self.log("runtime install exit=\(code)")
             DispatchQueue.main.async {
                 window.orderOut(nil)

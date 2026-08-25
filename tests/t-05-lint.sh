@@ -61,6 +61,22 @@ assert_contains "$agent" '["--trusted-host", authority]' "GUI 把受信任主机
 # Without --wait-pid the swap would replace the bundle under a running app.
 assert_contains "$agent" '"检查更新…"' "应用菜单里有检查更新入口"
 assert_contains "$agent" '"--wait-pid", String(pid)' "安装更新时把自身 pid 交给 swap"
+
+# --- one argv element per argument -------------------------------------------
+# The launcher parses each argv element whole, so a string holding two words
+# arrives as one unknown argument. `runScript("runtime install")` did exactly that
+# and failed with exit 2 -- unnoticed for as long as the button behind it was
+# unreachable, which means the managed-runtime install had never once run from the
+# GUI. Cheap to check, so checked.
+# Comments are stripped first: the fix is documented in prose that quotes the
+# broken call, and an explanation must not trip the check that enforces it.
+bad_argv=$(sed 's|//.*$||' "$REPO/LauncherAgent.swift" \
+    | grep -oE '(runScript|runUpdate)\(\[?"[^"]* [^"]*"' || true)
+assert_eq "" "$bad_argv" "传给 launcher 的每个参数都不含空格"
+# Reverse verification: the pattern has to be able to see the mistake.
+probe_hit=$(printf 'let x = runScript("runtime install")\n' \
+    | grep -oE '(runScript|runUpdate)\(\[?"[^"]* [^"]*"' || true)
+assert_eq 'runScript("runtime install"' "$probe_hit" "反向验证：该规则确实能命中"
 assert_contains "$agent" 'NSApp.terminate' "暂存成功后退出以让替换进行"
 # update is not instance-scoped: adding --backend/--port/--host to it would be
 # noise at best, and at worst would look like it selects what gets updated.

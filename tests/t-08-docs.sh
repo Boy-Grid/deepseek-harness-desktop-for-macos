@@ -120,6 +120,14 @@ assert_contains "$security" "did not start" "SECURITY 载明「只停自己启�
 assert_contains "$security" "no authentication" "SECURITY 写明 DSH 没有认证"
 assert_contains "$security" "not access control" "SECURITY 写明受信任主机不是访问控制"
 assert_contains "$security" "Cancel" "SECURITY 写明确认框默认在安全一侧"
+# The update path replaces the running application, so the gates it applies -- and
+# the reason the identity comparison is the load-bearing one -- have to stay
+# written down. So does the refusal for ad-hoc builds, which is the surprising bit.
+assert_contains "$security" "Team ID of the new app" "SECURITY 写明比对新版本的 Team ID"
+assert_contains "$security" "somebody" "SECURITY 解释有效签名只证明「有人」签过"
+assert_contains "$security" "ad-hoc signed" "SECURITY 写明 ad-hoc 构建被拒绝"
+assert_contains "$security" "no background polling" "SECURITY 写明没有后台轮询"
+assert_contains "$security" "per IP address" "SECURITY 写明 API 限额按 IP 计"
 
 readme=$(cat README.md)
 readme_zh=$(cat README.zh.md)
@@ -130,6 +138,8 @@ assert_contains "$readme" "No password, no token, nothing." "README 直白讲清
 assert_contains "$readme" "is not access control" "README 写明受信任主机不是访问控制"
 assert_contains "$readme_zh" "没有任何认证" "中文 README 直白讲清无认证"
 assert_contains "$readme_zh" "不是访问控制" "中文 README 写明受信任主机不是访问控制"
+assert_contains "$readme" "Team ID of the app being replaced" "README 写明比对被替换应用的 Team ID"
+assert_contains "$readme_zh" "与被替换的应用一致" "中文 README 写明同样的比对"
 assert_contains "$readme" "not affiliated with" "README 载有免责声明"
 assert_contains "$readme" "macOS 14" "README 写明最低系统版本"
 # Matched on a short fragment on purpose: the full sentence wraps, and an

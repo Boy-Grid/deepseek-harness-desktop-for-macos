@@ -16,8 +16,20 @@ self-contained and do not require deep knowledge of the codebase.
 **The app** — native window with up to 8 title-bar tabs; per-tab persistent
 storage so sessions stay independent and each tab returns to its own; tab rename
 with manual names outranking page titles; drag to reorder; preferences for the
-backend and the DSH home; a first-run question about which backend to use; About
-panel with attribution and the trademark disclaimer.
+backend, the DSH home, the bind address, the Host-header trust list and the port;
+a first-run question about which backend to use; About panel with attribution and
+the trademark disclaimer.
+
+**Updates** — a menu item that compares this bundle against the latest GitHub
+release and can install it, on request only. A download replaces the running app
+only if its checksum matches the release's `SHA256SUMS`, it passes Gatekeeper, and
+its signing Team ID equals the one already installed; an ad-hoc local build has no
+identity to anchor to and is refused rather than downgraded to a weaker check.
+
+**Network exposure** — the bind address is configurable, and leaving loopback is
+gated behind a dialog that states the consequence (the harness UI has no
+authentication) with Cancel as the default, restated in red in the preferences
+window and on stderr at every start.
 
 **Instance management** — one shell script owns start/stop/status/restart/open;
 two backends (stock dsh, or dsh-mfw for multi-folder workspaces) with a guard
@@ -55,10 +67,10 @@ opens a draft.
 | Item | Notes |
 |---|---|
 | Split `LauncherAgent.swift` further | Still ~1800 lines. The point is not tidiness: pure logic has to come out of AppKit before it can be unit-tested. `main`, `Preferences` and `TabStore` are already separate. |
-| Swift unit tests (XCTest) | Blocked on the split above. The shell side is well covered; the Swift side is not covered at all. |
+| Swift unit tests (XCTest) | Partly worked around rather than solved: `tests/t-11-exposure.sh` compiles a probe against `Preferences.swift` and asserts the pure decisions in it, which is enough for the bind-address classifier. Everything entangled with AppKit is still uncovered and needs the split above. |
 | Uninstall command | Remove the app, its state directory and its per-tab storage. Currently a manual `rm`. **[good first PR]** |
 | Log rotation | `logs/web.log` grows without bound. **[good first PR]** |
-| Check for updates | A menu item that compares against the latest release. Sparkle is the obvious route but adds a dependency; a link-only version is a smaller start. |
+| Delta or background updates | The updater downloads a whole image, on request only. Sparkle would bring appcasts and background checks, at the cost of a dependency and of replacing an identity check that is currently ten lines. Not obviously worth it. |
 | Member-count badge on workspace rows | Cosmetic, mfw backend only. **[good first PR]** |
 
 ### Runtime management

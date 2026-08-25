@@ -212,6 +212,39 @@ listen on, not an address to connect to. If you do open it up, do so only on a
 network where you trust every device, and prefer an SSH tunnel or a
 reverse proxy that authenticates in front of dsh.
 
+## Updates
+
+**DSH Desktop → Check for Updates…** compares this bundle against the latest
+GitHub release and offers to install it. Nothing happens on a schedule: one menu
+action makes one API call, and downloading needs a second confirmation.
+
+Before a download is allowed to replace the running app, three things have to
+hold, in this order:
+
+1. the image's SHA-256 matches its line in the release's `SHA256SUMS`;
+2. the app inside passes `codesign --verify --strict` and Gatekeeper's `spctl
+   --assess`, the same check a first launch would face;
+3. the Team ID of the new signature equals the Team ID of the app being replaced.
+
+The third is the one that matters. A checksum published alongside the image proves
+only that the two agree, and a valid Developer ID proves only that *somebody*
+signed it; anchoring to the identity already installed is what makes a compromised
+release unable to substitute a different publisher's app. See
+[SECURITY.md](SECURITY.md#updates) for the rest.
+
+A bundle you built yourself is ad-hoc signed and so has no identity to compare
+against — updating in place is refused for it rather than falling back to a weaker
+check. Run `./build.sh` again, or install a release.
+
+The replacement is a small script written outside the bundle, because a bundle
+cannot overwrite itself while running. It waits for the app to exit, swaps the
+directories by rename, reopens the app and removes itself; if anything fails, the
+installed copy is left untouched.
+
+The check is anonymous, so it draws on GitHub's budget of 60 API calls an hour per
+IP address. Behind a shared address that can already be spent, which is reported
+as a rate limit rather than as a broken network.
+
 ## Tabs
 
 New tab with `+`, ⌘T or the context menu; the newest sits next to `+` and older
@@ -251,6 +284,8 @@ L="$HOME/Applications/DSH Desktop.app/Contents/MacOS/launcher"
 "$L" restart
 "$L" open       # open the URL in the default browser
 "$L" launch     # start + open
+"$L" update check    # compare this bundle against the latest release
+"$L" update install  # download it, verify it, and replace this bundle
 "$L" help
 ```
 

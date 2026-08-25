@@ -55,6 +55,16 @@ done
 agent=$(cat "$REPO/LauncherAgent.swift")
 assert_contains "$agent" '["--host", host]' "GUI 把绑定地址传给 launcher"
 assert_contains "$agent" '["--trusted-host", authority]' "GUI 把受信任主机逐个传给 launcher"
+
+# --- the updater is reachable and hands over its own pid --------------------
+# Without --wait-pid the swap would replace the bundle under a running app.
+assert_contains "$agent" '"检查更新…"' "应用菜单里有检查更新入口"
+assert_contains "$agent" '"--wait-pid", String(pid)' "安装更新时把自身 pid 交给 swap"
+assert_contains "$agent" 'NSApp.terminate' "暂存成功后退出以让替换进行"
+# update is not instance-scoped: adding --backend/--port/--host to it would be
+# noise at best, and at worst would look like it selects what gets updated.
+assert_not_contains "$(sed -n '/private func runUpdate/,/^    }/p' "$REPO/LauncherAgent.swift")" \
+    "--backend" "update 不带实例相关参数"
 # Readiness and every tab talk to loopback whatever was bound, because 0.0.0.0 is
 # an interface to listen on rather than an address to connect to.
 assert_contains "$agent" 'http://127.0.0.1:\(port)' "标签地址固定走 loopback"

@@ -1878,6 +1878,151 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         NSApp.activate()
     }
 
+    // MARK: - updates
+    //
+    // Only when asked. The launcher does the work — release lookup, checksum,
+    // signature and Team ID checks, and the detached swap — so this side is
+    // limited to running it, reading its key/value report, and asking.
+
+    /// Whether an update check or install is in flight, so a second click cannot
+    /// start a parallel download.
+    private var updateInFlight = false
+
+    @objc private func checkForUpdates() {
+        guard !updateInFlight else { return }
+        updateInFlight = true
+        log("checking for updates")
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (code, out) = self.runUpdate(["check"])
+            DispatchQueue.main.async {
+                self.updateInFlight = false
+                self.presentUpdateCheck(code: code, output: out)
+            }
+        }
+    }
+
+    /// `update` is not an instance-scoped command, so it deliberately skips the
+    /// backend/port/host arguments `runScript` adds — it only needs to be told
+    /// which bundle is being asked about.
+    private func runUpdate(_ args: [String]) -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: scriptPath)
+        p.arguments = ["--app", Bundle.main.bundlePath] + ["update"] + args
+        p.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do {
+            try p.run()
+        } catch {
+            log("cannot run the updater: \(error)")
+            return (127, "无法运行启动器脚本：\(error.localizedDescription)")
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+
+    /// Pull one `key: value` line out of the launcher's report.
+    private func field(_ key: String, in output: String) -> String? {
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == key else { continue }
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    private func presentUpdateCheck(code: Int32, output: String) {
+        let alert = NSAlert()
+        alert.addButton(withTitle: "好")
+        guard code == 0, let status = field("status", in: output) else {
+            alert.messageText = "无法检查更新"
+            alert.informativeText = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty ? "详见日志" : output.trimmingCharacters(in: .whitespacesAndNewlines)
+            alert.runModal()
+            return
+        }
+        let current = field("current", in: output) ?? "?"
+        let latest = field("latest", in: output) ?? "?"
+        let page = field("page", in: output)
+
+        guard status == "outdated" else {
+            alert.messageText = status == "ahead"
+                ? "当前版本比已发布的更新"
+                : "已是最新版本"
+            alert.informativeText = "已安装 \(current)，最新发布 \(latest)。"
+            alert.runModal()
+            return
+        }
+
+        let ask = NSAlert()
+        ask.messageText = "有新版本 \(latest)"
+        ask.informativeText = "当前安装的是 \(current)。下载后会校验磁盘映像的 SHA-256、"
+            + "Apple 公证状态，以及新版本的签名者是否与当前版本一致；三项都通过才会替换。\n\n"
+            + "替换需要先退出应用，之后会自动重新打开。"
+        ask.addButton(withTitle: "下载并安装")
+        ask.addButton(withTitle: "稍后")
+        if page != nil { ask.addButton(withTitle: "查看发布说明") }
+        switch ask.runModal() {
+        case .alertFirstButtonReturn:
+            installUpdate(latest: latest)
+        case .alertThirdButtonReturn:
+            if let page, let url = URL(string: page) { NSWorkspace.shared.open(url) }
+        default:
+            log("update to \(latest) declined")
+        }
+    }
+
+    /// Download and stage, then quit so the detached swap can take over.
+    ///
+    /// The app stays up for the whole download and every check; nothing is
+    /// disturbed until the launcher reports a staged copy. Quitting is the last
+    /// step, and it is what releases the bundle for replacement.
+    private func installUpdate(latest: String) {
+        guard !updateInFlight else { return }
+        updateInFlight = true
+        let progress = NSAlert()
+        progress.messageText = "正在下载 \(latest)"
+        progress.informativeText = "下载与校验完成后应用会退出并自动重新打开。"
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.startAnimation(nil)
+        spinner.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
+        progress.accessoryView = spinner
+        // Shown without a button that could dismiss it while the child runs; the
+        // sheet is taken down from the completion handler below.
+        let window = progress.window
+        progress.layout()
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+
+        let pid = ProcessInfo.processInfo.processIdentifier
+        log("installing update \(latest)")
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            let (code, out) = self.runUpdate(["install", "--wait-pid", String(pid)])
+            DispatchQueue.main.async {
+                window.orderOut(nil)
+                self.updateInFlight = false
+                guard code == 0, self.field("staged", in: out) != nil else {
+                    self.log("update failed: exit \(code)")
+                    let failed = NSAlert()
+                    failed.messageText = "更新未完成"
+                    let detail = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                    failed.informativeText = detail.isEmpty ? "详见日志" : detail
+                    failed.addButton(withTitle: "好")
+                    failed.runModal()
+                    return
+                }
+                self.log("update staged; quitting to let the swap run")
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
     // MARK: - preferences
 
     @objc private func showPreferences() {
@@ -2041,6 +2186,11 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                                     action: #selector(showAboutPanel),
                                     keyEquivalent: "")
         about.target = self
+        appMenu.addItem(.separator())
+        let update = appMenu.addItem(withTitle: "检查更新…",
+                                     action: #selector(checkForUpdates),
+                                     keyEquivalent: "")
+        update.target = self
         appMenu.addItem(.separator())
         let prefs = appMenu.addItem(withTitle: "偏好设置…",
                                     action: #selector(showPreferences),

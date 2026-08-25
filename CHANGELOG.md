@@ -3,6 +3,33 @@
 This project follows [semantic versioning](https://semver.org/). Dates are
 release dates.
 
+## Unreleased
+
+### Added
+
+- **Network settings.** The bind address, the web app's Host-header trust list and
+  the port are now settings (`--host`, `--trusted-host`, `--port` on the launcher).
+  Loopback stays the default. Leaving it needs a confirmation that states what it
+  costs — the DeepSeek Harness UI has no authentication, so anyone who can reach
+  the port can drive an agent that reads and writes files and runs commands — with
+  *Cancel* as the default button. The exposure is restated in the preferences
+  window while it is in effect, and on stderr and in the log at every start.
+  Readiness is still probed over loopback whatever is bound.
+- **Check for Updates.** A menu item that compares this bundle against the latest
+  GitHub release and can install it. On request only: no background polling, and a
+  second confirmation before anything is downloaded. A download replaces the
+  running app only if its SHA-256 matches the release's `SHA256SUMS`, the app
+  inside passes Gatekeeper, and its signing Team ID equals the one already
+  installed. A locally built bundle is ad-hoc signed and has no identity to
+  compare against, so updating in place is refused for it outright.
+  Also available as `launcher update check` and `launcher update install`.
+
+### Fixed
+
+- The anchor check in `tests/t-08-docs.sh` skipped same-file links entirely, and
+  its slug rule reduced any Chinese heading to the empty string, so anchors in
+  `README.zh.md` were never verified.
+
 ## 0.1.0 — 2026-08-24
 
 First public release.

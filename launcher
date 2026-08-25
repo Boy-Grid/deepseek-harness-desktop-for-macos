@@ -31,6 +31,9 @@
 #   launcher runtime install     fetch Node.js and dsh into this app's directory
 #   launcher runtime uninstall   remove them again (DSH data is untouched)
 #
+#   launcher update check        compare this bundle's version with the latest release
+#   launcher update install      download that release and replace this bundle
+#
 # Nothing is bundled: the disk image carries neither Node.js nor dsh.  A runtime
 # the user installed themselves always wins; `runtime install` is for the case
 # where there is none, and it verifies Node's tarball against a checksum pinned
@@ -51,6 +54,10 @@
 #                                installed dsh          (DSH_LAUNCHER_ALLOW_VERSION_SKEW=1)
 #   --no-browser                 do not open a browser  (DSH_LAUNCHER_NO_BROWSER=1)
 #   --state <dir>                state directory        (DSH_LAUNCHER_STATE)
+#   --app <path>                 bundle the update commands read and replace
+#                                (DSH_LAUNCHER_UPDATE_APP; defaults to the one
+#                                this script was shipped in)
+#   --wait-pid <n>               pid the update swap waits for before replacing
 #
 # State lives in "$HOME/Library/Application Support/DSH Desktop"
 # unless DSH_LAUNCHER_STATE overrides it: web.pid (the PID we started), dsh-path
@@ -99,6 +106,17 @@ MANAGED_NODE_SHA256_X64="58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee
 NODE_DIST_BASE="${DSH_LAUNCHER_NODE_DIST:-https://nodejs.org/dist}"
 NODE_SHA_OVERRIDE="${DSH_LAUNCHER_NODE_SHA256:-}"
 MANAGED_DSH_SPEC="${DSH_LAUNCHER_DSH_SPEC:-@deepseek-ai/dsh}"
+# --- updates ---------------------------------------------------------------
+# Checked only when asked: there is no background poll and no automatic install.
+# The API base is overridable so tests can answer from a local file instead of
+# reaching GitHub; like NODE_DIST_BASE it is not a security boundary, since the
+# signature checks in update_install are what decide whether anything is kept.
+UPDATE_REPO="${DSH_LAUNCHER_UPDATE_REPO:-Boy-Grid/deepseek-harness-desktop-for-macos}"
+UPDATE_API_BASE="${DSH_LAUNCHER_UPDATE_API:-https://api.github.com}"
+# Where to look for this bundle's own version, and what to replace. Both are
+# overridable so the update path can be exercised against a fixture bundle.
+UPDATE_APP_OVERRIDE="${DSH_LAUNCHER_UPDATE_APP:-}"
+UPDATE_WAIT_PID=""
 
 START_TIMEOUT=60      # seconds to wait for the UI to answer
 STOP_TIMEOUT=20       # seconds to wait for the port to close
@@ -129,6 +147,20 @@ while [ $# -gt 0 ]; do
                 *) echo "$PROG: unknown runtime subcommand: $1" >&2; exit 2 ;;
             esac
             ;;
+        update)
+            CMD="update"; shift
+            case "${1:-check}" in
+                check|install) SUBCMD="$1"; shift ;;
+                -*|"") SUBCMD="check" ;;
+                *) echo "$PROG: unknown update subcommand: $1" >&2; exit 2 ;;
+            esac
+            ;;
+        # Whose exit the swap should wait for, and what it should replace. Both
+        # are passed by the app, which knows its own pid and bundle.
+        --wait-pid)   [ $# -ge 2 ] && UPDATE_WAIT_PID="${2}"; shift 2 ;;
+        --wait-pid=*) UPDATE_WAIT_PID="${1#*=}"; shift ;;
+        --app)     [ $# -ge 2 ] && UPDATE_APP_OVERRIDE="${2}"; shift 2 ;;
+        --app=*)   UPDATE_APP_OVERRIDE="${1#*=}"; shift ;;
         --port)    [ $# -ge 2 ] && PORT="${2}"; shift 2 ;;
         --port=*)  PORT="${1#*=}"; shift ;;
         --backend)   [ $# -ge 2 ] && BACKEND="${2}"; shift 2 ;;
@@ -655,6 +687,396 @@ runtime_uninstall() {
     log "your DSH data was not touched; sessions and credentials stay in $EFFECTIVE_DSH_HOME"
 }
 
+# ===========================================================================
+# updates
+#
+# Only ever on request.  The chain that decides whether a download is allowed to
+# replace this app is, in order: the release's own SHA256SUMS (integrity of the
+# transfer), Gatekeeper's assessment (it was notarized by Apple), and finally the
+# Team ID of the new signature against the Team ID of the bundle being replaced.
+#
+# That last one is the check that carries the weight.  The checksum comes from the
+# same release as the image, so it proves only that the two agree; a valid
+# Developer ID proves only that *somebody* signed it.  Comparing the identity
+# against the one already installed is what makes a compromised release unable to
+# hand this machine a different publisher's app.
+# ===========================================================================
+
+# The bundle this script was shipped inside: .../DSH Desktop.app/Contents/MacOS.
+# Run from a checkout there is none, and the update commands say so rather than
+# guessing at a path to overwrite.
+bundle_path() {
+    if [ -n "$UPDATE_APP_OVERRIDE" ]; then
+        printf '%s\n' "$UPDATE_APP_OVERRIDE"
+        return 0
+    fi
+    local dir
+    dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || return 1
+    case "$dir" in
+        */Contents/MacOS) printf '%s\n' "${dir%/Contents/MacOS}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# plutil rather than PlistBuddy: PlistBuddy answers a missing file with "File
+# Doesn't Exist, Will Create:" on *stdout*, which a caller reading the version
+# would happily compare as if it were one.
+bundle_version() { # bundle path
+    plutil -extract CFBundleShortVersionString raw -o - \
+        -- "$1/Contents/Info.plist" 2>/dev/null
+}
+
+# The Team ID from a bundle's signature, or empty for an ad-hoc signature (which
+# is what a local ./build.sh produces).  Empty is meaningful: it means there is no
+# identity to anchor an update to.
+bundle_team_id() { # bundle path
+    codesign -dv --verbose=4 "$1" 2>&1 \
+        | sed -n 's/^TeamIdentifier=\(.*\)$/\1/p' \
+        | sed 's/^not set$//'
+}
+
+# Strictly greater, comparing as versions rather than as strings so that 0.10.0
+# outranks 0.9.0.
+version_gt() { # a b
+    [ "$1" != "$2" ] || return 1
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
+}
+
+# A release field, read with plutil -- macOS parses JSON natively, so this needs
+# no jq and no python.
+release_field() { # json file, key path
+    plutil -extract "$2" raw -o - -- "$1" 2>/dev/null
+}
+
+# The browser_download_url of the first asset whose name matches a glob.
+release_asset_url() { # json file, glob
+    local i=0 name
+    while :; do
+        name=$(release_field "$1" "assets.$i.name") || return 1
+        [ -n "$name" ] || return 1
+        # shellcheck disable=SC2254  # the glob is the point
+        case "$name" in
+            $2) release_field "$1" "assets.$i.browser_download_url"; return 0 ;;
+        esac
+        i=$((i + 1))
+        [ "$i" -lt 100 ] || return 1
+    done
+}
+
+# Fetches the release into $1, and on failure says which kind of failure it was.
+#
+# The distinction is worth the code: GitHub allows 60 anonymous API calls an hour
+# *per IP*, so a machine behind a shared address can be refused while its network
+# is perfectly fine.  Reporting that as "check your connection" sends the user to
+# debug the wrong thing.
+fetch_latest_release() { # destination file
+    local hdr code remaining reset
+    hdr="${1}.headers"
+    # No -f: an HTTP error still has headers and a body worth reading.  curl's own
+    # exit status then only reports connection-level trouble.
+    if ! code=$(curl -s -L --proto '=https,http' --max-time 30 \
+            -H 'Accept: application/vnd.github+json' \
+            -D "$hdr" -o "$1" -w '%{http_code}' \
+            "$UPDATE_API_BASE/repos/$UPDATE_REPO/releases/latest" 2>/dev/null); then
+        echo "$PROG: 连不上 ${UPDATE_API_BASE}，请检查网络连接后重试。" >&2
+        return 1
+    fi
+    case "$code" in
+        200) return 0 ;;
+        403|429)
+            remaining=$(sed -n 's/^[Xx]-[Rr]ate[Ll]imit-[Rr]emaining: *\([0-9][0-9]*\).*/\1/p' "$hdr" | tail -n 1)
+            if [ "${remaining:-1}" = "0" ]; then
+                reset=$(sed -n 's/^[Xx]-[Rr]ate[Ll]imit-[Rr]eset: *\([0-9][0-9]*\).*/\1/p' "$hdr" | tail -n 1)
+                echo "$PROG: GitHub API 的匿名请求限额已用完（每小时 60 次，按 IP 计算）。" >&2
+                [ -n "$reset" ] && echo "  约 $(date -r "$reset" '+%H:%M' 2>/dev/null) 之后恢复。" >&2
+                echo "  也可以直接打开 https://github.com/$UPDATE_REPO/releases 查看。" >&2
+            else
+                echo "$PROG: GitHub 拒绝了这次请求（HTTP ${code}）。" >&2
+            fi
+            return 1 ;;
+        404)
+            echo "$PROG: 查不到 $UPDATE_REPO 的发布信息（HTTP 404）。" >&2
+            return 1 ;;
+        *)
+            echo "$PROG: 查询最新版本失败（HTTP ${code}）。" >&2
+            return 1 ;;
+    esac
+}
+
+update_check() {
+    local app current
+    if ! app=$(bundle_path); then
+        echo "$PROG: 找不到应用 bundle —— update 只能在 .app 里运行。" >&2
+        return 1
+    fi
+    current=$(bundle_version "$app")
+    if [ -z "$current" ]; then
+        echo "$PROG: 读不到当前版本（$app/Contents/Info.plist）" >&2
+        return 1
+    fi
+
+    local tmp json
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/dsh-update.XXXXXX") || return 1
+    json="$tmp/release.json"
+    # fetch_latest_release has already said what went wrong and why.
+    if ! fetch_latest_release "$json"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    local tag latest asset status
+    tag=$(release_field "$json" tag_name)
+    if [ -z "$tag" ]; then
+        rm -rf "$tmp"
+        echo "$PROG: 发布信息里没有 tag_name，无法判断版本。" >&2
+        return 1
+    fi
+    latest="${tag#v}"
+    asset=$(release_asset_url "$json" '*.dmg')
+    if version_gt "$latest" "$current"; then
+        status="outdated"
+    elif version_gt "$current" "$latest"; then
+        status="ahead"
+    else
+        status="current"
+    fi
+
+    echo "current: $current"
+    echo "latest:  $latest"
+    echo "status:  $status"
+    echo "page:    https://github.com/$UPDATE_REPO/releases/tag/$tag"
+    [ -n "$asset" ] && echo "asset:   $asset"
+    echo "app:     $app"
+    rm -rf "$tmp"
+    return 0
+}
+
+# Everything that has to hold before a downloaded bundle is allowed to replace the
+# installed one.  Split out from update_install so it can be tested on its own
+# against fixture bundles, and so the reason for a refusal is one message.
+verify_downloaded_app() { # new app, current app
+    local new="$1" current="$2" want got
+
+    if ! codesign --verify --strict --deep "$new" 2>/dev/null; then
+        echo "$PROG: 下载的应用签名校验失败，已放弃更新。" >&2
+        return 1
+    fi
+
+    # Gatekeeper's own verdict, which is what an ordinary first launch would face.
+    if ! spctl --assess --type execute "$new" >/dev/null 2>&1; then
+        echo "$PROG: 下载的应用未通过 Gatekeeper 评估（可能未公证），已放弃更新。" >&2
+        return 1
+    fi
+
+    want=$(bundle_team_id "$current")
+    got=$(bundle_team_id "$new")
+    check_team_id "$want" "$got" || return 1
+    log "signature verified: Team ID $got"
+    return 0
+}
+
+# The identity comparison on its own, so it can be reasoned about -- and tested --
+# without a notarized bundle and two certificates to hand.  Every outcome other
+# than "both present and equal" is a refusal.
+check_team_id() { # want, got
+    local want="$1" got="$2"
+    if [ -z "$want" ]; then
+        echo "$PROG: 当前应用是 ad-hoc 签名（通常是本地 ./build.sh 构建的），没有可以比对的开发者身份。" >&2
+        echo "  为避免把一个无法验证来源的版本装上来，自动更新在这种情况下不进行。" >&2
+        echo "  请到 https://github.com/$UPDATE_REPO/releases 手动下载，或直接重新构建。" >&2
+        return 1
+    fi
+    if [ -z "$got" ]; then
+        echo "$PROG: 下载的应用没有开发者 Team ID，已放弃更新。" >&2
+        return 1
+    fi
+    if [ "$want" != "$got" ]; then
+        echo "$PROG: 下载的应用签名者与当前应用不一致，已放弃更新。" >&2
+        echo "  当前 Team ID $want" >&2
+        echo "  下载 Team ID $got" >&2
+        echo "  有效的开发者签名只能证明「有人」签过名；这里要求的是与已安装的那一个相同。" >&2
+        return 1
+    fi
+    return 0
+}
+
+# The swap cannot run from inside the bundle it replaces, so it is written out to
+# a temporary directory first and started detached.  It waits for the app to exit,
+# replaces the bundle, reopens it, and removes itself.
+write_swap_script() { # path to write, staged app, target app, pid to wait for
+    cat > "$1" <<'SWAP'
+#!/bin/bash
+# Written by `launcher update install`.  Replaces an app bundle once the process
+# using it has exited, then reopens it and deletes itself.
+set -u
+staged="$1"; target="$2"; waitpid="${3:-0}"
+# Tenths of a second to wait for that pid. 600 = 60s; the tests pass a small
+# number so the give-up branch can be exercised without a minute of sleeping.
+limit="${4:-600}"
+log="${TMPDIR:-/tmp}/dsh-desktop-update.log"
+say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$log"; }
+say "waiting for pid $waitpid to exit"
+if [ "$waitpid" -gt 0 ]; then
+    waited=0
+    while kill -0 "$waitpid" 2>/dev/null; do
+        sleep 0.2
+        waited=$((waited + 1))
+        # Still alive means the user cancelled the quit; leave the installed app
+        # exactly as it was rather than replacing it out from under a running one.
+        if [ "$waited" -gt "$limit" ]; then
+            say "pid $waitpid still running after ${limit} ticks; aborting without changes"
+            rm -rf "$(dirname "$staged")" "$0"
+            exit 1
+        fi
+    done
+fi
+# ditto into a sibling, then exchange by rename: a failed copy must not leave a
+# half-written bundle where a working one used to be.
+new="${target}.update-new"
+old="${target}.update-old"
+rm -rf "$new" "$old"
+if ! /usr/bin/ditto "$staged" "$new"; then
+    say "ditto failed; $target left untouched"
+    rm -rf "$new" "$(dirname "$staged")" "$0"
+    exit 1
+fi
+if [ -d "$target" ] && ! mv "$target" "$old"; then
+    say "cannot move the old bundle aside; $target left untouched"
+    rm -rf "$new" "$(dirname "$staged")" "$0"
+    exit 1
+fi
+if ! mv "$new" "$target"; then
+    say "cannot move the new bundle into place; restoring"
+    [ -d "$old" ] && mv "$old" "$target"
+    rm -rf "$new" "$(dirname "$staged")" "$0"
+    exit 1
+fi
+rm -rf "$old"
+say "replaced $target"
+/usr/bin/open "$target" || say "reopen failed; start it from Finder"
+rm -rf "$(dirname "$staged")"
+rm -f "$0"
+SWAP
+    chmod 700 "$1"
+}
+
+update_install() {
+    local app current
+    if ! app=$(bundle_path); then
+        echo "$PROG: 找不到应用 bundle —— update 只能在 .app 里运行。" >&2
+        return 1
+    fi
+    current=$(bundle_version "$app")
+    [ -n "$current" ] || { echo "$PROG: 读不到当前版本" >&2; return 1; }
+
+    local tmp json
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/dsh-update.XXXXXX") || return 1
+    json="$tmp/release.json"
+    # fetch_latest_release has already said what went wrong and why.
+    if ! fetch_latest_release "$json"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    local tag latest dmg_url sums_url dmg_name
+    tag=$(release_field "$json" tag_name)
+    latest="${tag#v}"
+    if [ -z "$latest" ]; then
+        rm -rf "$tmp"
+        echo "$PROG: 发布信息里没有 tag_name" >&2
+        return 1
+    fi
+    if ! version_gt "$latest" "$current"; then
+        rm -rf "$tmp"
+        log "already at $current; latest release is $latest"
+        return 0
+    fi
+
+    dmg_url=$(release_asset_url "$json" '*.dmg')
+    sums_url=$(release_asset_url "$json" 'SHA256SUMS')
+    if [ -z "$dmg_url" ] || [ -z "$sums_url" ]; then
+        rm -rf "$tmp"
+        echo "$PROG: 发布 $tag 里缺少 .dmg 或 SHA256SUMS，无法自动更新。" >&2
+        echo "  请到 https://github.com/$UPDATE_REPO/releases/tag/$tag 手动下载。" >&2
+        return 1
+    fi
+    dmg_name="${dmg_url##*/}"
+
+    log "downloading $dmg_name"
+    if ! curl -fsSL --proto '=https,http' --max-time 900 \
+            -o "$tmp/$dmg_name" "$dmg_url" \
+        || ! curl -fsSL --proto '=https,http' --max-time 60 \
+            -o "$tmp/SHA256SUMS" "$sums_url"; then
+        rm -rf "$tmp"
+        echo "$PROG: 下载失败。请检查网络连接后重试。" >&2
+        return 1
+    fi
+
+    # Only the line for the image we actually fetched: a SHA256SUMS listing other
+    # files would otherwise fail the check for being unable to find them.
+    grep " \{1,2\}${dmg_name}\$" "$tmp/SHA256SUMS" > "$tmp/expected.sha256"
+    if [ ! -s "$tmp/expected.sha256" ]; then
+        rm -rf "$tmp"
+        echo "$PROG: SHA256SUMS 里没有 $dmg_name 的记录，已放弃更新。" >&2
+        return 1
+    fi
+    if ! ( cd "$tmp" && shasum -a 256 -c expected.sha256 >/dev/null 2>&1 ); then
+        rm -rf "$tmp"
+        echo "$PROG: 磁盘映像校验和不匹配，已丢弃下载内容。" >&2
+        echo "  这可能是下载损坏，也可能是内容被替换过。" >&2
+        return 1
+    fi
+    log "checksum verified"
+
+    local mnt
+    mnt="$tmp/mnt"
+    mkdir -p "$mnt" || { rm -rf "$tmp"; return 1; }
+    if ! hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$tmp/$dmg_name"; then
+        rm -rf "$tmp"
+        echo "$PROG: 无法挂载磁盘映像，已放弃更新。" >&2
+        return 1
+    fi
+
+    # Everything below must detach before returning, however it ends.
+    local new_app rc=0
+    new_app=$(find "$mnt" -maxdepth 1 -name '*.app' -print 2>/dev/null | head -n 1)
+    if [ -z "$new_app" ]; then
+        echo "$PROG: 映像里找不到 .app，已放弃更新。" >&2
+        rc=1
+    elif ! verify_downloaded_app "$new_app" "$app"; then
+        rc=1
+    else
+        # Copied off the image before it is unmounted, and before the running app
+        # is asked to quit: nothing is disturbed until a good copy exists on disk.
+        mkdir -p "$tmp/staged"
+        if ! ditto "$new_app" "$tmp/staged/$(basename "$new_app")"; then
+            echo "$PROG: 从映像复制应用失败，已放弃更新。" >&2
+            rc=1
+        fi
+    fi
+    hdiutil detach -quiet "$mnt" 2>/dev/null || hdiutil detach -quiet -force "$mnt" 2>/dev/null
+    if [ "$rc" -ne 0 ]; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    # The staged copy and the swap script outlive this process, so they go
+    # somewhere the temp cleanup above will not take with it.
+    local keep swap
+    keep=$(mktemp -d "${TMPDIR:-/tmp}/dsh-update-staged.XXXXXX") || { rm -rf "$tmp"; return 1; }
+    mv "$tmp/staged" "$keep/staged"
+    swap="$keep/swap.sh"
+    write_swap_script "$swap" "$keep/staged/$(basename "$new_app")" "$app" "$UPDATE_WAIT_PID"
+    rm -rf "$tmp"
+
+    log "staged $latest; the swap runs once pid ${UPDATE_WAIT_PID:-0} exits"
+    nohup "$swap" "$keep/staged/$(basename "$new_app")" "$app" "${UPDATE_WAIT_PID:-0}" \
+        >/dev/null 2>&1 &
+    echo "staged:  $latest"
+    echo "swap:    $swap"
+    return 0
+}
+
 # Does this node exist and satisfy a minimum major version?  A minimum of 0 means
 # "any", which is the stock backend: upstream declares no engines field, so
 # inventing a floor there could reject a setup that works.
@@ -1066,6 +1488,13 @@ case "$CMD" in
             install)   runtime_install ;;
             uninstall) runtime_uninstall ;;
             *) echo "$PROG: unknown runtime subcommand: $SUBCMD" >&2; exit 2 ;;
+        esac
+        ;;
+    update)
+        case "$SUBCMD" in
+            check)   update_check; exit $? ;;
+            install) update_install; exit $? ;;
+            *) echo "$PROG: unknown update subcommand: $SUBCMD" >&2; exit 2 ;;
         esac
         ;;
     status)

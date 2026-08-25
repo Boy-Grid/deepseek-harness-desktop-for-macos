@@ -49,7 +49,8 @@ Termination escalates SIGTERM → wait → SIGKILL, and only ever over that tree
 
 By default the instance listens on `127.0.0.1` only, on port 3080. This app adds
 no listener of its own and makes no outbound connections except the readiness
-probe to that local URL. Nothing is sent anywhere by this app.
+probe to that local URL, and — only when you ask for it — the release check and
+download described under [Updates](#updates). Nothing else is sent anywhere.
 
 Navigation is fenced: anything not same-origin with the local instance is handed
 to the default browser instead of loading in the window. Same-origin
@@ -84,6 +85,44 @@ What this app does about it:
 If you need remote access, an SSH tunnel or a reverse proxy that authenticates in
 front of dsh is the safer shape. Binding to a LAN interface is appropriate only
 on a network where every device is trusted.
+
+### Updates
+
+*Check for Updates* in the app menu asks GitHub Releases for the latest version,
+and can download and install it. There is no background polling, no telemetry and
+no automatic install: one menu action, one API call, and a second confirmation
+before anything is downloaded.
+
+An update is refused unless all of these hold, in this order:
+
+1. **Integrity.** The image's SHA-256 matches its entry in the release's
+   `SHA256SUMS`. On a mismatch the download is discarded and nothing is mounted.
+2. **Notarization.** The app inside the image passes `codesign --verify --strict`
+   and Gatekeeper's own `spctl --assess`, which is the check an ordinary first
+   launch would face.
+3. **Identity.** The Team ID of the new app's signature equals the Team ID of the
+   app being replaced.
+
+The third is the one that carries the weight. The checksum ships in the same
+release as the image, so it proves only that the two agree; a valid Developer ID
+proves only that *somebody* signed it. Comparing against the identity already
+installed is what stops a compromised release from handing this machine a
+different publisher's app.
+
+A consequence worth stating: a locally built bundle is ad-hoc signed and therefore
+has no identity to anchor to, so in-place updating is refused for it outright
+rather than falling back to something weaker. Rebuild from source, or install a
+release.
+
+The replacement itself is done by a small script written outside the bundle, since
+a bundle cannot overwrite itself while it is executing. It waits for the app to
+exit, copies the new bundle to a sibling path, exchanges the two by rename,
+reopens the app, and deletes itself. If the copy fails, or if the app is still
+running after 60 seconds, the installed bundle is left exactly as it was.
+
+The check is unauthenticated, so it counts against GitHub's anonymous API budget
+of 60 calls an hour **per IP address**. Behind a shared address that can be spent
+by someone else, which is reported as a rate limit rather than as a network fault.
 
 ### The multi-folder backend widens the agent's write surface
 

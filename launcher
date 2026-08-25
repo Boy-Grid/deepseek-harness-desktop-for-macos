@@ -1352,7 +1352,11 @@ status_of() {
 # Record a start failure the same way everywhere: state it in the log the user
 # is pointed at, and on stderr for whoever called us.
 start_fail() {
-    ERR_MSG="$1"
+    # Some callers forward text that already carries the program prefix -- the node
+    # resolver writes its own diagnostics to stderr and start_server passes them
+    # through verbatim -- so one leading prefix is stripped. Without this the
+    # dialog reads "DSH Desktop: DSH Desktop: ...".
+    ERR_MSG="${1#"$PROG": }"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] launcher: $ERR_MSG" >>"$WEB_LOG"
     echo "$PROG: $ERR_MSG" >&2
     return 1

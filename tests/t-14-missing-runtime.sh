@@ -20,6 +20,14 @@ PORT="${D4M_TEST_PORT:-3187}"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/d4m-t14.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
+# start_server checks the port before it resolves anything, so a service already
+# there short-circuits every case below into "not mine" rather than the resolution
+# failure under test. Say so instead of reporting five unrelated failures.
+if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT" 2>/dev/null; then
+    skip "全部用例（端口 ${PORT} 已被占用，设 D4M_TEST_PORT 换一个）"
+    finish; exit $?
+fi
+
 # Resolution is stubbed rather than arranged: making "no node anywhere" true would
 # mean controlling /opt/homebrew and /usr/local, which no test can rely on -- CI
 # installs node on PATH. What is under test is the code a failed resolution
@@ -56,6 +64,22 @@ out=$(
 )
 assert_contains "$out" "runtime install" "缺 dsh 的提示里给出了 runtime install 这条出路"
 assert_contains "$out" "npm install -g @deepseek-ai/dsh" "同时保留自行安装的办法"
+
+# --- the message goes into a dialog verbatim, so it must read cleanly --------
+# resolve_node writes its own "$PROG: ..." to stderr and start_server forwards it,
+# which used to produce "DSH Desktop: DSH Desktop: ..." on screen.
+node_msg=$(
+    export DSH_LAUNCHER_LIB=1
+    # shellcheck source=/dev/null
+    . "$L" --port "$PORT" --state "$TMP/state" >/dev/null 2>&1
+    # Stubbed, like every other case here. Without this the real resolvers succeed
+    # on a developer machine and the case starts an actual server on the test port,
+    # which then makes the assertions below pass or fail for the wrong reason.
+    resolve_node() { echo "$PROG: 找不到 Node.js 运行时。" >&2; return 1; }
+    start_server 2>&1
+)
+assert_not_contains "$node_msg" "DSH Desktop: DSH Desktop:" "程序名前缀不重复出现"
+assert_contains "$node_msg" "找不到 Node.js" "仍然说明了缺什么"
 
 # --- mfw missing must NOT claim a fetch would fix it ------------------------
 # The managed runtime installs @deepseek-ai/dsh, not dsh-mfw. Offering to fetch

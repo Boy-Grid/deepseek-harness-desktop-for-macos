@@ -1046,9 +1046,19 @@ staged="$1"; target="$2"; waitpid="${3:-0}"
 # Tenths of a second to wait for that pid. 600 = 60s; the tests pass a small
 # number so the give-up branch can be exercised without a minute of sleeping.
 limit="${4:-600}"
+# Everything this helper owns -- the staged copy and this script itself -- lives in
+# one directory, and it goes away on every exit path. Removing only the staged
+# subdirectory used to leave an empty one behind after each update, and doing it
+# inline risked truncating a script that bash was still reading.
+keep=$(dirname "$(dirname "$staged")")
+trap '/bin/rm -rf "$keep"' EXIT
 log="${TMPDIR:-/tmp}/dsh-desktop-update.log"
 say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$log"; }
 say "waiting for pid $waitpid to exit"
+# `kill -0` cannot tell "gone" from "not yours", so a pid owned by another user
+# reads as exited. That is the right answer here anyway: the pid handed over is
+# always this app's own, and a number that now belongs to someone else means the
+# app it referred to is long gone.
 if [ "$waitpid" -gt 0 ]; then
     waited=0
     while kill -0 "$waitpid" 2>/dev/null; do
@@ -1058,7 +1068,6 @@ if [ "$waitpid" -gt 0 ]; then
         # exactly as it was rather than replacing it out from under a running one.
         if [ "$waited" -gt "$limit" ]; then
             say "pid $waitpid still running after ${limit} ticks; aborting without changes"
-            rm -rf "$(dirname "$staged")" "$0"
             exit 1
         fi
     done
@@ -1070,25 +1079,23 @@ old="${target}.update-old"
 rm -rf "$new" "$old"
 if ! /usr/bin/ditto "$staged" "$new"; then
     say "ditto failed; $target left untouched"
-    rm -rf "$new" "$(dirname "$staged")" "$0"
+    rm -rf "$new"
     exit 1
 fi
 if [ -d "$target" ] && ! mv "$target" "$old"; then
     say "cannot move the old bundle aside; $target left untouched"
-    rm -rf "$new" "$(dirname "$staged")" "$0"
+    rm -rf "$new"
     exit 1
 fi
 if ! mv "$new" "$target"; then
     say "cannot move the new bundle into place; restoring"
     [ -d "$old" ] && mv "$old" "$target"
-    rm -rf "$new" "$(dirname "$staged")" "$0"
+    rm -rf "$new"
     exit 1
 fi
 rm -rf "$old"
 say "replaced $target"
 /usr/bin/open "$target" || say "reopen failed; start it from Finder"
-rm -rf "$(dirname "$staged")"
-rm -f "$0"
 SWAP
     chmod 700 "$1"
 }

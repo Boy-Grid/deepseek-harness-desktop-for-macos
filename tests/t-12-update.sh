@@ -278,42 +278,51 @@ assert_eq "0.1.0" "$(plutil -extract CFBundleShortVersionString raw -o - \
 # ===========================================================================
 # Named .app so /usr/bin/open refuses it outright instead of revealing a folder
 # in Finder; the script treats a failed reopen as non-fatal either way.
+# The layout mirrors the real one: keep/ holds everything the helper owns and is
+# removed wholesale on every exit path, while the target sits outside it, where an
+# installed bundle lives. Putting the target inside keep/ made these cases pass for
+# the wrong reason, and hid the fact that only keep/staged was being cleaned up.
 swap_case() { # case dir
     local d="$TMP/$1"
     rm -rf "$d"
-    mkdir -p "$d/staged/New.app" "$d/Target.app"
-    printf 'new\n' > "$d/staged/New.app/marker"
+    mkdir -p "$d/keep/staged/New.app" "$d/Target.app"
+    printf 'new\n' > "$d/keep/staged/New.app/marker"
     printf 'old\n' > "$d/Target.app/marker"
-    write_swap_script "$d/swap.sh" "$d/staged/New.app" "$d/Target.app" 0
+    write_swap_script "$d/keep/swap.sh" "$d/keep/staged/New.app" "$d/Target.app" 0
 }
 
 # Replaces only after the pid it was given has exited.
 swap_case waits
 sleep 30 & hold=$!
-"$TMP/waits/swap.sh" "$TMP/waits/staged/New.app" "$TMP/waits/Target.app" "$hold" 20 &
+"$TMP/waits/keep/swap.sh" "$TMP/waits/keep/staged/New.app" "$TMP/waits/Target.app" "$hold" 20 &
 sleep 1
 assert_eq "old" "$(cat "$TMP/waits/Target.app/marker")" "目标进程还活着时不替换"
 kill "$hold" 2>/dev/null
 waited=0
-while [ "$waited" -lt 50 ] && [ -f "$TMP/waits/swap.sh" ]; do sleep 0.2; waited=$((waited+1)); done
+while [ "$waited" -lt 50 ] && [ -d "$TMP/waits/keep" ]; do sleep 0.2; waited=$((waited+1)); done
 assert_eq "new" "$(cat "$TMP/waits/Target.app/marker" 2>/dev/null)" "进程退出后完成替换"
-assert_false "替换后 swap 脚本自删" -- test -f "$TMP/waits/swap.sh"
-assert_false "替换后暂存目录清理" -- test -d "$TMP/waits/staged"
+assert_false "替换后 swap 脚本自删" -- test -f "$TMP/waits/keep/swap.sh"
+assert_false "替换后整个工作目录都被清掉" -- test -d "$TMP/waits/keep"
+
+# The helper owns one directory and must take all of it with it. Cleaning only the
+# staged subdirectory left an empty one in TMPDIR after every single update.
+real_swap_leftovers() { find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'dsh-update-staged.*' 2>/dev/null; }
+assert_eq "" "$(real_swap_leftovers)" "真实路径下不留空的暂存目录"
 
 # Gives up rather than replacing under a process that never exits.
 swap_case stubborn
 sleep 30 & hold=$!
-"$TMP/stubborn/swap.sh" "$TMP/stubborn/staged/New.app" "$TMP/stubborn/Target.app" "$hold" 3
+"$TMP/stubborn/keep/swap.sh" "$TMP/stubborn/keep/staged/New.app" "$TMP/stubborn/Target.app" "$hold" 3
 rc=$?
 kill "$hold" 2>/dev/null
 assert_ne "0" "$rc" "等待超时后以非 0 退出"
 assert_eq "old" "$(cat "$TMP/stubborn/Target.app/marker")" "等待超时后目标保持原样"
-assert_false "等待超时后 swap 脚本自删" -- test -f "$TMP/stubborn/swap.sh"
+assert_false "等待超时后工作目录也清掉" -- test -d "$TMP/stubborn/keep"
 
 # A copy that cannot be made must leave the installed bundle alone.
 swap_case badsource
-rm -rf "$TMP/badsource/staged/New.app"
-"$TMP/badsource/swap.sh" "$TMP/badsource/staged/New.app" "$TMP/badsource/Target.app" 0 5
+rm -rf "$TMP/badsource/keep/staged/New.app"
+"$TMP/badsource/keep/swap.sh" "$TMP/badsource/keep/staged/New.app" "$TMP/badsource/Target.app" 0 5
 rc=$?
 assert_ne "0" "$rc" "复制失败时以非 0 退出"
 assert_eq "old" "$(cat "$TMP/badsource/Target.app/marker")" "复制失败时目标保持原样"

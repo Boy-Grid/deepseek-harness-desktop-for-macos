@@ -90,4 +90,19 @@ restart_body=$(sed -n '/private func restartInstance/,/^    }$/p' "$REPO/Launche
 assert_contains "$restart_body" "presentStartFailure" "切换后端失败时走统一入口"
 assert_contains "$restart_body" "restartInstance()" "装完运行时后按切换语义重试（会重载标签）"
 
+# --- what the offer says, and what it shows while working --------------------
+# The dialog used to promise Node.js came from the official release, which stopped
+# being true once mirrors were configurable; and a download failure is most often
+# the network, which is the one problem the mirror setting solves.
+offer_body=$(sed -n '/private func offerRuntimeInstall/,/^    }$/p' "$REPO/LauncherAgent.swift")
+assert_contains "$offer_body" "偏好设置里选定的下载源" "运行时提示如实说明下载源可配置"
+assert_contains "$offer_body" "校验和固定在" "运行时提示说明校验和是固定的"
+install_body=$(sed -n '/private func runRuntimeInstall/,/^    }$/p' "$REPO/LauncherAgent.swift")
+assert_contains "$install_body" "偏好设置 → 下载源" "安装失败时指向镜像设置"
+# Progress is a panel, not an NSAlert: an alert outside a modal session draws a
+# default button that does nothing. Both long-running jobs share the one panel.
+assert_contains "$install_body" "Self.progressPanel" "安装进度用统一的进度面板"
+assert_not_contains "$install_body" "accessoryView = spinner" "不再把 NSAlert 当进度框"
+assert_not_contains "$agent" "panel.accessoryView" "全文件都没有残留的 NSAlert 进度框"
+
 finish

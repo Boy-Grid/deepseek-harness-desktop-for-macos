@@ -1606,20 +1606,11 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                     self.activeBackend = Preferences.shared.backend
                 }
                 if code != 0 {
-                    let detail = out.trimmingCharacters(in: .whitespacesAndNewlines)
                     DispatchQueue.main.async {
-                        let alert = NSAlert()
-                        // A missing runtime is the one failure this app can do
-                        // something about, so it gets an offer rather than just a
-                        // verdict. Everything else only gets the reason.
-                        if self.looksLikeMissingRuntime(detail) {
-                            self.offerRuntimeInstall(reason: detail)
-                            return
-                        }
-                        alert.messageText = "DeepSeek Harness Web UI 启动失败"
-                        alert.informativeText = detail.isEmpty ? "未知错误，详见日志" : detail
-                        alert.addButton(withTitle: "好")
-                        alert.runModal()
+                        self.presentStartFailure(
+                            code: code, output: out,
+                            title: "DeepSeek Harness Web UI 启动失败",
+                            retry: { [weak self] in self?.ensureAndOpen() })
                     }
                     return
                 }
@@ -1635,13 +1626,34 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     // What it can do is fetch the official ones on request, which is what the
     // launcher's `runtime install` does.
 
-    /// The launcher names the install command in exactly the failures a fetch
-    /// would fix, so that string is the signal rather than a guess at the prose.
-    private func looksLikeMissingRuntime(_ detail: String) -> Bool {
-        detail.contains("runtime install")
+    /// The launcher's exit code for "a runtime this app could fetch is missing".
+    ///
+    /// A code rather than a phrase. This used to search the error text for
+    /// "runtime install", which meant the offer depended on how each message
+    /// happened to be worded — and a missing stock dsh, the case the managed
+    /// runtime exists for, was worded without it.
+    private static let exitNeedsRuntime: Int32 = 4
+
+    /// The single place a failed start becomes something on screen, so the initial
+    /// start and a settings-driven restart cannot disagree about whether a missing
+    /// runtime gets an offer or only a verdict. `retry` is what to do once an
+    /// install succeeds, which differs between those two callers.
+    private func presentStartFailure(code: Int32, output: String, title: String,
+                                    retry: @escaping () -> Void) {
+        let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The one failure this app can do something about.
+        if code == Self.exitNeedsRuntime {
+            offerRuntimeInstall(reason: detail, retry: retry)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail.isEmpty ? "未知错误，详见日志" : detail
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
-    private func offerRuntimeInstall(reason: String) {
+    private func offerRuntimeInstall(reason: String, retry: @escaping () -> Void) {
         let alert = NSAlert()
         alert.messageText = "缺少运行时"
         alert.informativeText = """
@@ -1650,26 +1662,30 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             本应用不捆绑运行时，但可以为你下载一份放在它自己的目录里，\
             不会影响你系统里已有的 Node.js 或 dsh。
 
-            Node.js 来自偏好设置里选定的下载源（默认官方发布），期望的校验和固定在\
-            应用内，下载到别的内容会被拒绝且不解压；dsh 用 npm 安装。实测：下载约 \
+            Node.js 取自官方发布，解压前会校验内容；dsh 用 npm 安装。实测：下载约 \
             50 MB，安装完成后**占用约 470 MB**（dsh 有一百多个依赖包），耗时 5–10 \
             分钟，取决于网络。随时可以在偏好设置里移除。
             """
         alert.addButton(withTitle: "下载并安装")
         alert.addButton(withTitle: "稍后")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        runRuntimeInstall()
+        runRuntimeInstall(retry: retry)
     }
 
     /// Runs the install with a progress sheet: it downloads ~50 MB and then runs
     /// npm, which is far too long to leave the UI looking idle.
-    private func runRuntimeInstall() {
-        // Same panel the updater uses: an NSAlert outside a modal session still
-        // draws its default button, and the work continues whether it is clicked
-        // or not, so that button could only mislead.
-        let window = Self.progressPanel(title: "正在安装运行时",
-                                        detail: "正在下载 Node.js 并安装 dsh，请稍候…")
-        window.center()
+    private func runRuntimeInstall(retry: @escaping () -> Void) {
+        let panel = NSAlert()
+        panel.messageText = "正在安装运行时"
+        panel.informativeText = "正在下载 Node.js 并安装 dsh，请稍候…"
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.startAnimation(nil)
+        spinner.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
+        panel.accessoryView = spinner
+        // No buttons that would dismiss it into a lie: the work continues either
+        // way, so the sheet is closed from the completion below.
+        let window = panel.window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
 
@@ -1682,19 +1698,14 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                 guard code == 0 else {
                     let failed = NSAlert()
                     failed.messageText = "运行时安装失败"
-                    // A failure here is most often the network, which is what the
-                    // mirror setting exists for — worth naming at the moment it
-                    // would help rather than only in the README.
                     failed.informativeText = out.trimmingCharacters(in: .whitespacesAndNewlines)
-                        + "\n\n如果是下载不通，可以在「偏好设置 → 下载源」里换一个 npm / "
-                        + "Node.js 镜像后重试。\n也可以自行安装 Node.js 22+ 与 dsh："
-                        + "npm install -g @deepseek-ai/dsh"
+                        + "\n\n也可以自行安装 Node.js 22+ 与 dsh：npm install -g @deepseek-ai/dsh"
                     failed.addButton(withTitle: "好")
                     failed.runModal()
                     return
                 }
                 self.log("runtime installed; retrying start")
-                self.ensureAndOpen()
+                retry()
             }
         }
     }
@@ -2170,13 +2181,15 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             let (startCode, startOut) = self.runScript("start", backend: wanted)
             self.log("start (\(wanted.rawValue)) exit=\(startCode)")
             guard startCode == 0 else {
-                let detail = startOut.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Through the shared presenter: switching backends is one of the
+                // ways to arrive at a machine with no runtime for the backend now
+                // wanted, and it used to end in a dead-end verdict here while the
+                // very same failure at launch offered to fetch one.
                 DispatchQueue.main.async {
-                    let alert = NSAlert()
-                    alert.messageText = "以 \(wanted.title) 启动失败"
-                    alert.informativeText = detail.isEmpty ? "未知错误，详见日志" : detail
-                    alert.addButton(withTitle: "好")
-                    alert.runModal()
+                    self.presentStartFailure(
+                        code: startCode, output: startOut,
+                        title: "以 \(wanted.title) 启动失败",
+                        retry: { [weak self] in self?.restartInstance() })
                 }
                 return
             }

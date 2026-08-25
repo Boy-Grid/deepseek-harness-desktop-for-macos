@@ -411,6 +411,39 @@ cat "$HOME/Library/Application Support/DSH Desktop/logs/agent.log" # the app
 For a non-default port or the mfw backend, look under `mfw/` and
 `ports/<port>/`; `"$L" status` prints the exact state directory it resolved.
 
+### Starting over
+
+To see the first-run question again without losing a fetched runtime, forget the
+one key that records the answer:
+
+```sh
+defaults delete io.github.boy-grid.dsh-desktop backendChosen && killall cfprefsd
+```
+
+To reset everything this app owns, quit it first — `cfprefsd` caches preferences
+and will write them back if you only delete the file:
+
+```sh
+osascript -e 'quit app "DSH Desktop"'; sleep 2
+"$L" stop 2>/dev/null
+
+defaults delete io.github.boy-grid.dsh-desktop
+rm -f  "$HOME/Library/Preferences/io.github.boy-grid.dsh-desktop.plist"
+killall cfprefsd
+
+# state, logs, and the managed runtime if one was fetched (~470 MB)
+rm -rf "$HOME/Library/Application Support/DSH Desktop"
+
+# per-tab web storage
+rm -rf "$HOME/Library/WebKit/io.github.boy-grid.dsh-desktop" \
+       "$HOME/Library/HTTPStorages/io.github.boy-grid.dsh-desktop" \
+       "$HOME/Library/Caches/io.github.boy-grid.dsh-desktop"
+```
+
+`~/.dsh` is not touched by any of that: sessions and credentials belong to dsh, not
+to this app. Remove it separately if you want those gone too, and expect to sign in
+again.
+
 ## Repository layout
 
 ```

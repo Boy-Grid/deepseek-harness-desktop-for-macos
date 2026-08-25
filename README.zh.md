@@ -351,6 +351,36 @@ cat "$HOME/Library/Application Support/DSH Desktop/logs/agent.log" # 应用
 非默认端口或 mfw 后端要看 `mfw/` 与 `ports/<port>/` 下面；`"$L" status` 会打印它实际
 解析出的状态目录。
 
+### 从头开始
+
+只想让首次运行的询问重新出现、又不想丢掉已下载的运行时，删掉记录答案的那一个键就够了：
+
+```sh
+defaults delete io.github.boy-grid.dsh-desktop backendChosen && killall cfprefsd
+```
+
+要清掉本应用的全部数据，先退出应用——`cfprefsd` 会缓存偏好，只删文件会被它写回去：
+
+```sh
+osascript -e 'quit app "DSH Desktop"'; sleep 2
+"$L" stop 2>/dev/null
+
+defaults delete io.github.boy-grid.dsh-desktop
+rm -f  "$HOME/Library/Preferences/io.github.boy-grid.dsh-desktop.plist"
+killall cfprefsd
+
+# 状态、日志，以及已下载的托管运行时（约 470 MB）
+rm -rf "$HOME/Library/Application Support/DSH Desktop"
+
+# 每标签的 Web 存储
+rm -rf "$HOME/Library/WebKit/io.github.boy-grid.dsh-desktop" \
+       "$HOME/Library/HTTPStorages/io.github.boy-grid.dsh-desktop" \
+       "$HOME/Library/Caches/io.github.boy-grid.dsh-desktop"
+```
+
+以上都不会碰 `~/.dsh`：会话与凭据属于 dsh，不属于本应用。想一并清掉就单独删它，之后需要
+重新登录。
+
 ## 仓库结构
 
 ```

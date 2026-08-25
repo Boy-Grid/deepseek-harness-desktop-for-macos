@@ -38,6 +38,18 @@ release dates.
 
 ### Fixed
 
+- **A missing runtime was not offered a fix in two of the three ways to hit it.**
+  The app decided whether a failed start was recoverable by searching the error
+  text for the words "runtime install". A missing stock dsh — precisely what the
+  managed runtime exists for — was worded without them, so no offer appeared; and
+  the check lived only on the launch path, so switching backends in Preferences
+  ended in a dead-end verdict even when the wording did match.
+
+  The launcher now exits with a distinct code (4) for "a runtime this app could
+  fetch is missing", and the app routes both the launch path and the
+  settings-driven restart through one presenter. A missing `dsh-mfw` deliberately
+  keeps exit 1: the managed runtime installs `@deepseek-ai/dsh`, so offering to
+  fetch would mean a 470 MB download that leaves the user equally stuck.
 - The anchor check in `tests/t-08-docs.sh` skipped same-file links entirely, and
   its slug rule reduced any Chinese heading to the empty string, so anchors in
   `README.zh.md` were never verified.

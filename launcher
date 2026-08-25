@@ -60,6 +60,10 @@
 #                                SHA-256 stays pinned here, so a mirror serving
 #                                anything else is refused
 #                                                       (DSH_LAUNCHER_NODE_DIST)
+#
+# Exit codes: 0 success; 2 a bad argument; 4 a runtime this app could fetch is
+# missing (`runtime install` would fix it); 1 anything else.
+#
 #   --allow-version-skew         boot mfw even if its baseline differs from the
 #                                installed dsh          (DSH_LAUNCHER_ALLOW_VERSION_SKEW=1)
 #   --no-browser                 do not open a browser  (DSH_LAUNCHER_NO_BROWSER=1)
@@ -138,6 +142,15 @@ UPDATE_API_BASE="${DSH_LAUNCHER_UPDATE_API:-https://api.github.com}"
 # overridable so the update path can be exercised against a fixture bundle.
 UPDATE_APP_OVERRIDE="${DSH_LAUNCHER_UPDATE_APP:-}"
 UPDATE_WAIT_PID=""
+
+# Exit code for "a runtime this app could fetch is missing", so a caller can offer
+# to fetch it instead of matching on the wording of a message.  Every other
+# failure keeps 1: an install would not fix it.
+#
+# This exists because the GUI used to detect the situation by searching the error
+# text for "runtime install", and a missing stock dsh -- the very case the managed
+# runtime was built for -- happened to be phrased without that string.
+EXIT_NEEDS_RUNTIME=4
 
 START_TIMEOUT=60      # seconds to wait for the UI to answer
 STOP_TIMEOUT=20       # seconds to wait for the port to close
@@ -1417,7 +1430,7 @@ start_server() {
     if ! node_bin=$(resolve_node "$min_node" 2>"$LOG_DIR/node-resolve.err"); then
         start_fail "$(cat "$LOG_DIR/node-resolve.err" 2>/dev/null)"
         rm -f "$LOG_DIR/node-resolve.err"
-        return 1
+        return "$EXIT_NEEDS_RUNTIME"
     fi
     rm -f "$LOG_DIR/node-resolve.err"
     # pnpm and corepack live next to the *real* node, so the child's PATH is
@@ -1443,8 +1456,10 @@ start_server() {
         args=(web --host "$BIND_HOST" --port "$PORT" --no-open)
     else
         if ! entry=$(resolve_dsh); then
-            start_fail "找不到 dsh CLI。请先运行 npm install -g @deepseek-ai/dsh，或用 --dsh 指定路径"
-            return 1
+            start_fail "找不到 dsh CLI。可以自行安装（npm install -g @deepseek-ai/dsh），或让本应用取一份私有副本：
+      launcher runtime install
+也可以用 --dsh 指定路径。"
+            return "$EXIT_NEEDS_RUNTIME"
         fi
         args=(--profile web --host "$BIND_HOST" --port "$PORT" --no-open)
     fi
@@ -1574,12 +1589,16 @@ open_browser() {
 do_launch() {
     # CLI entry (start if needed, then open the browser). The GUI entry point
     # is LauncherAgent; this stays for terminal/agent use.
-    if start_server; then
+    # The code is preserved rather than flattened to 1: EXIT_NEEDS_RUNTIME is part
+    # of the contract, and a caller of `launch` deserves it too.
+    local rc=0
+    start_server || rc=$?
+    if [ "$rc" -eq 0 ]; then
         open_browser
         return $?
     else
         osascript -e "display dialog \"DeepSeek Harness Web UI 启动失败。\n\n原因：${ERR_MSG}\n\n日志文件：$WEB_LOG\" with title \"$PROG\" buttons {\"好\"} default button 1" >/dev/null 2>&1
-        return 1
+        return "$rc"
     fi
 }
 

@@ -151,6 +151,16 @@ assert_contains "$readme" "An npm registry is one" "README 写明 npm registry �
 assert_contains "$readme_zh" "不是信任选择" "中文 README 写明 Node 镜像不是信任选择"
 assert_contains "$readme_zh" "是信任选择" "中文 README 写明 npm registry 是信任选择"
 assert_contains "$readme" "Nothing is passed by default" "README 写明默认不覆盖 npm 配置"
+# Resetting has to be written down, and specifically the cfprefsd step: deleting
+# the plist alone looks like it worked and is then undone by the cache.
+assert_contains "$readme" "killall cfprefsd" "README 重置步骤包含 killall cfprefsd"
+assert_contains "$readme" "backendChosen" "README 给出只重放首次询问的办法"
+assert_contains "$readme" "Library/WebKit/io.github.boy-grid.dsh-desktop" \
+    "README 列出每标签存储的位置"
+assert_contains "$readme_zh" "killall cfprefsd" "中文 README 重置步骤包含 killall cfprefsd"
+assert_contains "$readme_zh" "backendChosen" "中文 README 给出只重放首次询问的办法"
+assert_contains "$readme_zh" "Library/WebKit/io.github.boy-grid.dsh-desktop" \
+    "中文 README 列出每标签存储的位置"
 assert_contains "$security" "not a trust boundary" "SECURITY 写明 Node 镜像不是信任边界"
 # Matched on a fragment that sits within one line: the sentence starts at the end
 # of the previous one, and an assertion spanning the break would fail on a reflow.

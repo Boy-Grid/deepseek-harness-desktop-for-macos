@@ -140,6 +140,22 @@ assert_contains "$readme_zh" "没有任何认证" "中文 README 直白讲清无
 assert_contains "$readme_zh" "不是访问控制" "中文 README 写明受信任主机不是访问控制"
 assert_contains "$readme" "Team ID of the app being replaced" "README 写明比对被替换应用的 Team ID"
 assert_contains "$readme_zh" "与被替换的应用一致" "中文 README 写明同样的比对"
+# The mirror table is a promise about where bytes come from, and the asymmetry
+# between its two halves is the part a reader most needs and most easily loses.
+for host in registry.npmmirror.com mirrors.cloud.tencent.com repo.huaweicloud.com; do
+    assert_contains "$readme" "$host" "README 列出镜像 $host"
+    assert_contains "$readme_zh" "$host" "中文 README 列出镜像 $host"
+done
+assert_contains "$readme" "not a trust decision" "README 写明 Node 镜像不是信任选择"
+assert_contains "$readme" "An npm registry is one" "README 写明 npm registry 是信任选择"
+assert_contains "$readme_zh" "不是信任选择" "中文 README 写明 Node 镜像不是信任选择"
+assert_contains "$readme_zh" "是信任选择" "中文 README 写明 npm registry 是信任选择"
+assert_contains "$readme" "Nothing is passed by default" "README 写明默认不覆盖 npm 配置"
+assert_contains "$security" "not a trust boundary" "SECURITY 写明 Node 镜像不是信任边界"
+# Matched on a fragment that sits within one line: the sentence starts at the end
+# of the previous one, and an assertion spanning the break would fail on a reflow.
+assert_contains "$security" "copy of \`~/.npmrc\` is ever made" \
+    "SECURITY 承诺不复制用户的 npmrc"
 assert_contains "$readme" "not affiliated with" "README 载有免责声明"
 assert_contains "$readme" "macOS 14" "README 写明最低系统版本"
 # Matched on a short fragment on purpose: the full sentence wraps, and an

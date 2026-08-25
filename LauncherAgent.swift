@@ -1120,6 +1120,9 @@ final class Agent: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let host = Preferences.shared.bindHost
         if host != Preferences.defaultBindHost { args += ["--host", host] }
         for authority in Preferences.shared.trustedHosts { args += ["--trusted-host", authority] }
+        // Where a fetched runtime comes from. Passed on every subcommand so that
+        // `runtime status` reports the same source `runtime install` would use.
+        args += Preferences.shared.mirrorArguments
         args += [cmd]
         p.arguments = args
         // A double-clicked app starts at "/", and an inherited "/" is a bad

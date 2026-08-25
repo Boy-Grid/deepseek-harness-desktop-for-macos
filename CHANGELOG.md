@@ -24,6 +24,18 @@ release dates.
   compare against, so updating in place is refused for it outright.
   Also available as `launcher update check` and `launcher update install`.
 
+- **npm and Node.js mirrors.** Four built-in presets (`npmjs`, `npmmirror`,
+  `tencent`, `huawei`) plus custom URLs, for networks where the defaults are slow
+  or blocked. `launcher mirrors` lists them; `--mirror`, `--registry` and
+  `--node-mirror` select them. Applies to what the app fetches itself — the pinned
+  Node.js build and the managed dsh; the mfw backend runs its own package manager
+  and follows your npm configuration.
+
+  Nothing is passed by default, so npm keeps reading your `~/.npmrc` and the proxy
+  and credentials in it. Choosing a Node.js mirror is not a trust decision — the
+  expected SHA-256 stays pinned in the launcher, so a mirror serving anything else
+  is refused; choosing an npm registry is one, and the documentation says so.
+
 ### Fixed
 
 - The anchor check in `tests/t-08-docs.sh` skipped same-file links entirely, and

@@ -146,7 +146,8 @@ It can also fetch them, but only when asked — either by accepting the offer sh
 when nothing is found, or by running `launcher runtime install`. That path
 downloads and then executes code, so it is worth being precise about:
 
-- Node.js comes from `https://nodejs.org/dist` and is verified against a
+- Node.js comes from `https://nodejs.org/dist` (or a configured mirror) and is
+  verified against a
   **SHA-256 checksum pinned in the launcher script** before it is unpacked. Taking
   the checksum from the same server as the download would only prove the two
   agree; pinning it means a compromised mirror — or a compromised nodejs.org —
@@ -156,6 +157,28 @@ downloads and then executes code, so it is worth being precise about:
 - dsh is installed with npm, which verifies registry integrity hashes itself.
   The install is confined to the app's own directory with `--prefix`; the global
   npm prefix and your own `node_modules` are not touched.
+
+#### Mirrors
+
+Both sources can be pointed at a mirror, for networks where the defaults are
+unreachable. The two halves differ in what that costs, and the app says so where
+the choice is made:
+
+- **The Node.js mirror is not a trust boundary.** The expected SHA-256 stays pinned
+  in the launcher, so a mirror that serves different bytes is refused and nothing
+  is unpacked. Nothing in the mirror configuration can supply the hash instead —
+  `tests/t-13-mirrors.sh` asserts a mirror serving other content is rejected, via
+  both the flag and a preset.
+- **The npm registry is a trust boundary.** npm checks integrity hashes that the
+  registry itself publishes, so a registry decides package contents. The built-in
+  list is therefore short and limited to well-known operators, and a custom
+  registry is something you type in deliberately.
+
+By default neither is set, so npm reads your own `~/.npmrc` — including the proxy
+and credentials in it. That is the point of the default: overriding it would break
+the configuration that the people who need mirrors are most likely to rely on. No
+copy of `~/.npmrc` is ever made, and the registry is passed to npm as an argument
+rather than by replacing its configuration file.
 - The runtime directory is created with mode `700`, so nothing else running as
   another user can drop a binary into a directory this app executes from.
 - `launcher runtime uninstall` removes it. Sessions and credentials live in

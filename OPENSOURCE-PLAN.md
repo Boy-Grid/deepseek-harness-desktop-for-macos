@@ -26,6 +26,12 @@ only if its checksum matches the release's `SHA256SUMS`, it passes Gatekeeper, a
 its signing Team ID equals the one already installed; an ad-hoc local build has no
 identity to anchor to and is refused rather than downgraded to a weaker check.
 
+**Mirrors** — four built-in npm/Node.js mirror presets plus custom URLs, for
+networks where the defaults are unreachable. Nothing is passed by default so npm
+keeps reading the user's own `~/.npmrc`. The pinned Node checksum still governs, so
+a Node mirror is a convenience rather than a trust decision; an npm registry is one,
+and is documented as such.
+
 **Network exposure** — the bind address is configurable, and leaving loopback is
 gated behind a dialog that states the consequence (the harness UI has no
 authentication) with Cancel as the default, restated in red in the preferences

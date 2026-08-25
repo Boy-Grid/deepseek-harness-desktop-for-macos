@@ -34,6 +34,8 @@
 #   launcher update check        compare this bundle's version with the latest release
 #   launcher update install      download that release and replace this bundle
 #
+#   launcher mirrors             list the built-in npm / Node.js mirrors
+#
 # Nothing is bundled: the disk image carries neither Node.js nor dsh.  A runtime
 # the user installed themselves always wins; `runtime install` is for the case
 # where there is none, and it verifies Node's tarball against a checksum pinned
@@ -50,6 +52,14 @@
 #   --mfw <path>                 dsh-mfw entry to use   (DSH_LAUNCHER_MFW)
 #   --node <path>                node binary to use     (DSH_LAUNCHER_NODE)
 #   --dsh-home <dir>             DSH_HOME for the child (DSH_LAUNCHER_DSH_HOME)
+#   --mirror <name>              built-in npm+Node mirror; see `launcher mirrors`
+#                                                       (DSH_LAUNCHER_MIRROR)
+#   --registry <url>             npm registry for the managed dsh install; unset
+#                                means inherit ~/.npmrc  (DSH_LAUNCHER_NPM_REGISTRY)
+#   --node-mirror <url>          where Node.js tarballs come from; the expected
+#                                SHA-256 stays pinned here, so a mirror serving
+#                                anything else is refused
+#                                                       (DSH_LAUNCHER_NODE_DIST)
 #   --allow-version-skew         boot mfw even if its baseline differs from the
 #                                installed dsh          (DSH_LAUNCHER_ALLOW_VERSION_SKEW=1)
 #   --no-browser                 do not open a browser  (DSH_LAUNCHER_NO_BROWSER=1)
@@ -103,9 +113,20 @@ MANAGED_NODE_SHA256_X64="58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee
 # Overridable for tests, which serve a small fake tarball from localhost rather
 # than pulling 48 MB. Not a security boundary: anyone able to set these could
 # replace this script outright.
-NODE_DIST_BASE="${DSH_LAUNCHER_NODE_DIST:-https://nodejs.org/dist}"
 NODE_SHA_OVERRIDE="${DSH_LAUNCHER_NODE_SHA256:-}"
 MANAGED_DSH_SPEC="${DSH_LAUNCHER_DSH_SPEC:-@deepseek-ai/dsh}"
+# --- mirrors ---------------------------------------------------------------
+# For networks where registry.npmjs.org and nodejs.org are slow or unreachable.
+# A named mirror is a pair: where npm packages come from, and where Node
+# distributions come from.
+#
+# Empty NPM_MIRROR means "inherit": nothing is passed to npm, so the user's own
+# ~/.npmrc -- including any proxy and auth settings they rely on -- decides. That
+# is deliberately the default; forcing registry.npmjs.org would override a working
+# setup for the very people this option exists for.
+NPM_MIRROR="${DSH_LAUNCHER_MIRROR:-}"
+NPM_REGISTRY="${DSH_LAUNCHER_NPM_REGISTRY:-}"
+NODE_DIST_BASE="${DSH_LAUNCHER_NODE_DIST:-}"
 # --- updates ---------------------------------------------------------------
 # Checked only when asked: there is no background poll and no automatic install.
 # The API base is overridable so tests can answer from a local file instead of
@@ -161,6 +182,7 @@ while [ $# -gt 0 ]; do
         --wait-pid=*) UPDATE_WAIT_PID="${1#*=}"; shift ;;
         --app)     [ $# -ge 2 ] && UPDATE_APP_OVERRIDE="${2}"; shift 2 ;;
         --app=*)   UPDATE_APP_OVERRIDE="${1#*=}"; shift ;;
+        mirrors)   CMD="mirrors"; shift ;;
         --port)    [ $# -ge 2 ] && PORT="${2}"; shift 2 ;;
         --port=*)  PORT="${1#*=}"; shift ;;
         --backend)   [ $# -ge 2 ] && BACKEND="${2}"; shift 2 ;;
@@ -180,6 +202,12 @@ while [ $# -gt 0 ]; do
 }${2}"; shift 2 ;;
         --trusted-host=*) TRUSTED_HOSTS="${TRUSTED_HOSTS}${TRUSTED_HOSTS:+
 }${1#*=}"; shift ;;
+        --mirror)     [ $# -ge 2 ] && NPM_MIRROR="${2}"; shift 2 ;;
+        --mirror=*)   NPM_MIRROR="${1#*=}"; shift ;;
+        --registry)   [ $# -ge 2 ] && NPM_REGISTRY="${2}"; shift 2 ;;
+        --registry=*) NPM_REGISTRY="${1#*=}"; shift ;;
+        --node-mirror)   [ $# -ge 2 ] && NODE_DIST_BASE="${2}"; shift 2 ;;
+        --node-mirror=*) NODE_DIST_BASE="${1#*=}"; shift ;;
         --allow-version-skew) ALLOW_SKEW=1; shift ;;
         --state)   [ $# -ge 2 ] && STATE_DIR="${2}" && STATE_EXPLICIT=1; shift 2 ;;
         --state=*) STATE_DIR="${1#*=}"; STATE_EXPLICIT=1; shift ;;
@@ -192,6 +220,8 @@ case "$BACKEND" in
     stock|mfw) ;;
     *) echo "$PROG: unknown backend: $BACKEND (expected 'stock' or 'mfw')" >&2; exit 2 ;;
 esac
+# Mirror resolution needs the lookup functions, so it happens further down, once
+# they are defined -- see "resolve the mirror selection".
 URL="http://${PROBE_HOST}:${PORT}"
 # State is partitioned so that two differently-booted instances can never read
 # each other's pid file: a non-stock backend adds its own level, a non-default
@@ -249,6 +279,83 @@ ensure_state() {
 
 url_up() {
     curl -s -o /dev/null --max-time 2 "$URL" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# mirrors
+#
+# Every entry below was checked to serve both halves, and the mirrored Node
+# tarballs were confirmed byte-identical to nodejs.org's.  That last point is what
+# makes offering them safe rather than a trade: the expected SHA-256 is pinned in
+# this script, so a mirror that served anything else would be refused.
+#
+# The npm registry is a different matter, and the documentation says so: npm checks
+# integrity hashes that come from the registry itself, so choosing a registry is
+# choosing who to trust for package contents.  Hence a short list of well-known
+# operators rather than a long one, and no attempt to guess.
+# ---------------------------------------------------------------------------
+MIRROR_NAMES="npmjs npmmirror tencent huawei"
+
+mirror_registry() { # name
+    case "$1" in
+        npmjs)     echo "https://registry.npmjs.org" ;;
+        npmmirror) echo "https://registry.npmmirror.com" ;;
+        tencent)   echo "https://mirrors.cloud.tencent.com/npm" ;;
+        huawei)    echo "https://repo.huaweicloud.com/repository/npm" ;;
+        *) return 1 ;;
+    esac
+}
+
+mirror_node_dist() { # name
+    case "$1" in
+        npmjs)     echo "https://nodejs.org/dist" ;;
+        npmmirror) echo "https://npmmirror.com/mirrors/node" ;;
+        tencent)   echo "https://mirrors.cloud.tencent.com/nodejs-release" ;;
+        huawei)    echo "https://repo.huaweicloud.com/nodejs" ;;
+        *) return 1 ;;
+    esac
+}
+
+mirror_label() { # name
+    case "$1" in
+        npmjs)     echo "官方 npm / nodejs.org" ;;
+        npmmirror) echo "npmmirror（阿里云）" ;;
+        tencent)   echo "腾讯云" ;;
+        huawei)    echo "华为云" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Only http(s), and only an absolute URL.  A typo that lands on a file:// path or
+# a bare hostname would otherwise surface much later as an unreadable npm error.
+valid_mirror_url() { # url
+    case "$1" in
+        https://*.|http://*.) return 1 ;;
+        https://?*|http://?*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+list_mirrors() {
+    local name reg nod mark
+    echo "内置镜像（--mirror <名字>）："
+    for name in $MIRROR_NAMES; do
+        reg=$(mirror_registry "$name")
+        nod=$(mirror_node_dist "$name")
+        mark=" "
+        [ "$name" = "$NPM_MIRROR" ] && mark="*"
+        printf '%s %-10s %s\n' "$mark" "$name" "$(mirror_label "$name")"
+        printf '             npm  %s\n' "$reg"
+        printf '             node %s\n' "$nod"
+    done
+    echo
+    echo "不指定 --mirror 时，npm 沿用你自己的 ~/.npmrc（代理与凭据都保留），"
+    echo "Node.js 从 $(mirror_node_dist npmjs) 下载。"
+    echo "也可以用 --registry <url> 和 --node-mirror <url> 单独指定其中一半。"
+    echo
+    echo "换 Node 镜像不降低安全性：期望的 SHA-256 固定写在本脚本里，"
+    echo "镜像若给出别的内容会被拒绝。换 npm registry 则是一个信任选择——"
+    echo "npm 校验的完整性哈希来自 registry 自身。"
 }
 
 # Whether a bind host keeps the server unreachable from other machines.  Every
@@ -540,6 +647,11 @@ managed_dsh_ready() { [ -f "$(managed_dsh_entry)" ]; }
 runtime_status() {
     local arch node_v dsh_v size
     arch=$(node_arch 2>/dev/null || echo "unsupported")
+    if [ -n "$NPM_MIRROR" ]; then
+        echo "mirror        $NPM_MIRROR  ($(mirror_label "$NPM_MIRROR"))"
+    fi
+    echo "npm registry  ${NPM_REGISTRY:-(跟随 ~/.npmrc)}"
+    echo "node dist     $NODE_DIST_BASE"
     echo "runtime dir   $RUNTIME_DIR"
     echo "architecture  $arch"
     if [ -d "$RUNTIME_DIR" ]; then
@@ -657,9 +769,17 @@ install_managed_dsh() {
     # dsh pulls in well over a hundred packages; a real install was measured at
     # about seven minutes. The fetch timeout and retries are npm's own, which is
     # simpler and more reliable than wrapping this in a watchdog of our own.
+    # Only when a registry was actually chosen: with no --registry npm falls back
+    # to the user's own ~/.npmrc, which is where their proxy and auth settings are.
+    local reg_args=()
+    if [ -n "$NPM_REGISTRY" ]; then
+        reg_args=(--registry "$NPM_REGISTRY")
+        log "npm registry: $NPM_REGISTRY"
+    fi
     if ! ( cd "$RUNTIME_DIR" && env PATH="$RUNTIME_NODE_DIR/bin:$PATH" \
             "$node_bin" "$npm_cli" install --silent --no-fund --no-audit \
             --fetch-timeout=120000 --fetch-retries=2 \
+            ${reg_args[@]+"${reg_args[@]}"} \
             --prefix "$RUNTIME_NPM_DIR" "$MANAGED_DSH_SPEC" ); then
         echo "$PROG: 安装 dsh 失败。请检查网络连接后重试。" >&2
         return 1
@@ -1474,6 +1594,34 @@ do_help() {
 }
 
 # ---------------------------------------------------------------------------
+# resolve the mirror selection
+#
+# Below the function definitions on purpose: the presets are looked up through
+# them, and running this next to the rest of the argument handling would call them
+# before they exist.  Still above the dispatch, so a sourced library run (tests)
+# sees the same resolved values a real invocation does.
+if [ -n "$NPM_MIRROR" ]; then
+    if ! mirror_registry "$NPM_MIRROR" >/dev/null 2>&1; then
+        echo "$PROG: unknown mirror: $NPM_MIRROR (expected one of: $MIRROR_NAMES)" >&2
+        exit 2
+    fi
+    # A preset fills in whichever half was not given explicitly, so --mirror can be
+    # combined with a single override instead of being all or nothing.
+    [ -n "$NPM_REGISTRY" ]   || NPM_REGISTRY=$(mirror_registry "$NPM_MIRROR")
+    [ -n "$NODE_DIST_BASE" ] || NODE_DIST_BASE=$(mirror_node_dist "$NPM_MIRROR")
+fi
+for _u in "$NPM_REGISTRY" "$NODE_DIST_BASE"; do
+    if [ -n "$_u" ] && ! valid_mirror_url "$_u"; then
+        echo "$PROG: not a usable mirror URL: $_u" >&2
+        echo "  期望形如 https://registry.example.com 这样的绝对地址。" >&2
+        exit 2
+    fi
+done
+unset _u
+# Node has no equivalent of ~/.npmrc to inherit from, so it always needs a value.
+[ -n "$NODE_DIST_BASE" ] || NODE_DIST_BASE=$(mirror_node_dist npmjs)
+
+# ---------------------------------------------------------------------------
 # Sourced with DSH_LAUNCHER_LIB=1 the script defines its helpers and returns
 # without dispatching, so tests can exercise them one at a time instead of only
 # through a full start/stop.
@@ -1496,6 +1644,9 @@ case "$CMD" in
             install) update_install; exit $? ;;
             *) echo "$PROG: unknown update subcommand: $SUBCMD" >&2; exit 2 ;;
         esac
+        ;;
+    mirrors)
+        list_mirrors; exit $?
         ;;
     status)
         status_of; exit $?

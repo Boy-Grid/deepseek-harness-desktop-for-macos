@@ -164,6 +164,7 @@ nodejs.org 本身）被攻破，代码也过不了这一关。不匹配就丢弃
 | **绑定地址** | 默认 `127.0.0.1`。改之前请读[让其他设备访问](#让其他设备访问) |
 | **受信任主机** | Web 应用 Host 头围栏的额外 authority，逗号分隔 |
 | **端口** | 默认 `3080`；环境变量 `DSH_LAUNCHER_PORT` 优先于该设置 |
+| **下载源** | 代下载运行时时用哪个 npm / Node.js 镜像，见[下载源与镜像](#下载源与镜像) |
 
 切换会先停掉正在跑的实例、再启动新的，然后重载全部标签。如果停不掉，会如实报告切换
 失败，而不是悄悄什么都没做。
@@ -181,6 +182,40 @@ Harness 的 Web 界面没有任何认证。** 没有密码，没有令牌。能�
 哪里，就绪探测和各个标签始终访问 `127.0.0.1`——`0.0.0.0` 指的是要监听哪些接口，而不是
 一个可以连接的地址。如果确实要开放，请只在你信任其上每一台设备的网络里这样做；更好的
 做法是用 SSH 隧道，或在 dsh 前面放一个带认证的反向代理。
+
+## 下载源与镜像
+
+给 `registry.npmjs.org` 和 `nodejs.org` 慢或不通的网络环境用。只作用于本应用代为下载的
+东西——固定版本的 Node.js 和托管的 dsh。在偏好设置里选，或用 `--mirror`：
+
+```sh
+"$L" mirrors                              # 列出内置镜像
+"$L" --mirror npmmirror runtime install
+"$L" --registry https://npm.internal.example/ runtime install
+```
+
+| 名字 | npm registry | Node.js |
+|---|---|---|
+| `npmjs` | `registry.npmjs.org` | `nodejs.org/dist` |
+| `npmmirror` | `registry.npmmirror.com` | `npmmirror.com/mirrors/node` |
+| `tencent` | `mirrors.cloud.tencent.com/npm` | `mirrors.cloud.tencent.com/nodejs-release` |
+| `huawei` | `repo.huaweicloud.com/repository/npm` | `repo.huaweicloud.com/nodejs` |
+
+`--registry` 和 `--node-mirror` 可以只指定其中一半，与 `--mirror` 同时使用时覆盖预设。
+
+**默认什么都不传。** 这样 npm 会读你自己的 `~/.npmrc`——代理和凭据都在那里；强行指向
+`registry.npmjs.org` 反而会破坏这个选项本来要照顾的那些配置。如果你就是想覆盖一个坏掉的
+`.npmrc`，显式选 `npmjs`。
+
+两半的性质并不相同，这一点值得讲清楚：
+
+- **换 Node.js 下载源不是信任选择。** 期望的 SHA-256 固定写在 launcher 里，镜像给出别的
+  内容会被拒绝且不解压。上表中的镜像都实测过，其压缩包与 nodejs.org 逐字节一致。
+- **换 npm registry 是信任选择。** npm 校验的完整性哈希来自 registry 自身，所以选 registry
+  等于选择相信谁提供的包内容。因此内置的只是一份短名单，不做猜测。
+
+多文件夹后端不在此列：`dsh-mfw` 会自己调包管理器准备运行时，跟随你的 npm/pnpm 配置。那条
+路径请在 `~/.npmrc` 里设置 registry（或 `pnpm config set registry …`）。
 
 ## 检查更新
 
@@ -244,6 +279,7 @@ L="$HOME/Applications/DSH Desktop.app/Contents/MacOS/launcher"
 "$L" launch     # start + open
 "$L" update check    # 把当前 bundle 与最新发布比较
 "$L" update install  # 下载、校验并替换当前 bundle
+"$L" mirrors         # 列出内置的 npm / Node.js 镜像
 "$L" help
 ```
 
@@ -251,6 +287,9 @@ L="$HOME/Applications/DSH Desktop.app/Contents/MacOS/launcher"
 |---|---|---|
 | `--port <n>` | `DSH_LAUNCHER_PORT` | `3080` |
 | `--host <host>` | `DSH_LAUNCHER_HOST` | `127.0.0.1`（见[上文](#让其他设备访问)） |
+| `--mirror <name>` | `DSH_LAUNCHER_MIRROR` | 无，见[下载源与镜像](#下载源与镜像) |
+| `--registry <url>` | `DSH_LAUNCHER_NPM_REGISTRY` | 沿用 `~/.npmrc` |
+| `--node-mirror <url>` | `DSH_LAUNCHER_NODE_DIST` | `https://nodejs.org/dist` |
 | `--trusted-host <authority>` | `DSH_LAUNCHER_TRUSTED_HOSTS`（换行分隔） | 无；可重复 |
 | `--backend <stock\|mfw>` | `DSH_LAUNCHER_BACKEND` | `stock` |
 | `--dsh <path>` | `DSH_LAUNCHER_DSH` | 自动探测，结果缓存进状态目录 |

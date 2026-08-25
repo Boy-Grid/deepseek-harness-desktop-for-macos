@@ -102,6 +102,87 @@ enum NetworkExposure {
     }
 }
 
+// MARK: - Mirrors
+
+/// Where the managed runtime is fetched from, for networks where the defaults are
+/// slow or blocked.
+///
+/// The table is the same one the `launcher` script carries; tests/t-05-lint.sh
+/// asserts the two stay in step. It applies to what the launcher installs itself —
+/// the pinned Node.js build and the managed dsh. The mfw backend runs its own
+/// package manager and follows the user's npm configuration instead.
+enum NpmMirror: String, CaseIterable {
+    /// Pass nothing, so npm uses the user's own `~/.npmrc`. The default, because
+    /// forcing a registry would override the proxy and auth settings that the
+    /// people who need this option are most likely to already depend on.
+    case inherit = ""
+    case npmjs
+    case npmmirror
+    case tencent
+    case huawei
+    /// URLs typed in by hand.
+    case custom
+
+    var title: String {
+        switch self {
+        case .inherit:   return "跟随系统 npm 配置（默认）"
+        case .npmjs:     return "官方 npm / nodejs.org"
+        case .npmmirror: return "npmmirror（阿里云）"
+        case .tencent:   return "腾讯云"
+        case .huawei:    return "华为云"
+        case .custom:    return "自定义…"
+        }
+    }
+
+    var registry: String? {
+        switch self {
+        case .npmjs:     return "https://registry.npmjs.org"
+        case .npmmirror: return "https://registry.npmmirror.com"
+        case .tencent:   return "https://mirrors.cloud.tencent.com/npm"
+        case .huawei:    return "https://repo.huaweicloud.com/repository/npm"
+        case .inherit, .custom: return nil
+        }
+    }
+
+    var nodeDist: String? {
+        switch self {
+        case .npmjs:     return "https://nodejs.org/dist"
+        case .npmmirror: return "https://npmmirror.com/mirrors/node"
+        case .tencent:   return "https://mirrors.cloud.tencent.com/nodejs-release"
+        case .huawei:    return "https://repo.huaweicloud.com/nodejs"
+        case .inherit, .custom: return nil
+        }
+    }
+
+    /// The launcher takes a preset by name; a custom choice is passed as the two
+    /// URLs instead. Inherit passes nothing at all.
+    var presetArgument: String? {
+        switch self {
+        case .inherit, .custom: return nil
+        default: return rawValue
+        }
+    }
+
+    /// Absolute http(s) only, mirroring `valid_mirror_url` in the launcher: a bare
+    /// hostname or a `file://` path would otherwise fail much later, inside npm.
+    static func isUsableURL(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("https://") || t.hasPrefix("http://") else { return false }
+        guard let url = URL(string: t), let host = url.host, !host.isEmpty else { return false }
+        return !host.hasSuffix(".")
+    }
+
+    /// Stated wherever a registry can be chosen. The two halves are not equally
+    /// consequential and saying so is the honest thing: a Node mirror is checked
+    /// against a checksum pinned in the launcher, so a substitution is caught,
+    /// while npm verifies integrity hashes that the registry itself supplies.
+    static let trustNote = """
+        换 Node.js 下载源不会降低安全性：期望的 SHA-256 固定写在 launcher 脚本里，\
+        镜像若给出别的内容会被拒绝。换 npm registry 则是一个信任选择——\
+        npm 校验的完整性哈希来自 registry 自身。请使用你信任的镜像。
+        """
+}
+
 // MARK: - Preferences
 
 /// UserDefaults-backed settings. Deliberately small — anything the launcher
@@ -119,6 +200,9 @@ final class Preferences {
         static let bindHost = "bindHost"
         static let trustedHosts = "trustedHosts"
         static let port = "port"
+        static let npmMirror = "npmMirror"
+        static let npmRegistry = "npmRegistry"
+        static let nodeMirror = "nodeMirror"
     }
 
     static let defaultBindHost = "127.0.0.1"
@@ -167,6 +251,34 @@ final class Preferences {
     var port: String {
         get { nonEmpty(defaults.string(forKey: Key.port)) ?? Preferences.defaultPort }
         set { defaults.set(NetworkExposure.normalizedPort(newValue), forKey: Key.port) }
+    }
+
+    /// Which mirror the managed runtime is fetched from.
+    var npmMirror: NpmMirror {
+        get { NpmMirror(rawValue: defaults.string(forKey: Key.npmMirror) ?? "") ?? .inherit }
+        set { defaults.set(newValue.rawValue, forKey: Key.npmMirror) }
+    }
+
+    /// Only consulted for `.custom`; a preset carries its own URLs.
+    var npmRegistry: String? {
+        get { nonEmpty(defaults.string(forKey: Key.npmRegistry)) }
+        set { defaults.set(nonEmpty(newValue), forKey: Key.npmRegistry) }
+    }
+
+    var nodeMirror: String? {
+        get { nonEmpty(defaults.string(forKey: Key.nodeMirror)) }
+        set { defaults.set(nonEmpty(newValue), forKey: Key.nodeMirror) }
+    }
+
+    /// The launcher arguments the current mirror choice amounts to.
+    var mirrorArguments: [String] {
+        let mirror = npmMirror
+        if let preset = mirror.presetArgument { return ["--mirror", preset] }
+        guard mirror == .custom else { return [] }
+        var args: [String] = []
+        if let registry = npmRegistry { args += ["--registry", registry] }
+        if let node = nodeMirror { args += ["--node-mirror", node] }
+        return args
     }
 
     /// The tabs to restore on the next launch, in chronological order.
@@ -270,6 +382,9 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     private let trustedField = NSTextField(string: "")
     private let portField = NSTextField(string: "")
     private let exposureNote = bodyLabel("", width: 420)
+    private let mirrorPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let registryField = NSTextField(string: "")
+    private let nodeMirrorField = NSTextField(string: "")
 
     convenience init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
@@ -356,8 +471,33 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         stack.addView(bodyLabel("端口决定了状态目录与每个标签的地址，改动需要重新启动应用。"
                                 + "环境变量 DSH_LAUNCHER_PORT 优先于这里的设置。", width: 420), in: .top)
 
+        // --- mirrors ---
+        stack.addView(sectionTitle("下载源（npm / Node.js）"), in: .top)
+        for mirror in NpmMirror.allCases {
+            mirrorPopup.addItem(withTitle: mirror.title)
+            mirrorPopup.lastItem?.representedObject = mirror.rawValue
+        }
+        selectMirror(Preferences.shared.npmMirror)
+        mirrorPopup.target = self
+        mirrorPopup.action = #selector(mirrorPicked)
+        stack.addView(mirrorPopup, in: .top)
+
+        stack.addView(fieldRow(label: "npm", field: registryField,
+                               value: Preferences.shared.npmRegistry ?? "",
+                               placeholder: "留空即沿用 ~/.npmrc",
+                               reset: #selector(resetRegistry)), in: .top)
+        stack.addView(fieldRow(label: "Node.js", field: nodeMirrorField,
+                               value: Preferences.shared.nodeMirror ?? "",
+                               placeholder: NpmMirror.npmjs.nodeDist ?? "",
+                               reset: #selector(resetNodeMirror)), in: .top)
+        stack.addView(bodyLabel("只影响本应用代为下载的运行时（固定版本的 Node.js 与托管的 dsh）。"
+                                + "多文件夹后端由 dsh-mfw 自己调用包管理器，跟随你的 npm 配置。",
+                                width: 420), in: .top)
+        stack.addView(bodyLabel(NpmMirror.trustNote, width: 420), in: .top)
+
         updateMFWNote()
         updateExposureNote()
+        syncMirrorFields()
         return root
     }
 
@@ -471,9 +611,11 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     /// asking about it.
     func controlTextDidEndEditing(_ note: Notification) {
         switch note.object as? NSTextField {
-        case bindHostField: commitBindHost()
-        case trustedField:  commitTrusted()
-        case portField:     commitPort()
+        case bindHostField:    commitBindHost()
+        case trustedField:     commitTrusted()
+        case portField:        commitPort()
+        case registryField:    commitRegistry()
+        case nodeMirrorField:  commitNodeMirror()
         default: break
         }
     }
@@ -554,6 +696,91 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         portField.stringValue = port
         onRelaunchNeeded?("端口已改为 \(port)。它决定了状态目录与每个标签的地址，"
                           + "需要重新启动应用才能生效。")
+    }
+
+    // MARK: mirror actions
+
+    private var selectedMirror: NpmMirror {
+        guard let raw = mirrorPopup.selectedItem?.representedObject as? String,
+              let mirror = NpmMirror(rawValue: raw) else { return .inherit }
+        return mirror
+    }
+
+    private func selectMirror(_ mirror: NpmMirror) {
+        if let index = NpmMirror.allCases.firstIndex(of: mirror) {
+            mirrorPopup.selectItem(at: index)
+        }
+    }
+
+    /// Show what the current choice resolves to. A preset's URLs are displayed but
+    /// not editable — editing them is what "custom" means, so typing in a field
+    /// moves the popup there rather than silently diverging from its label.
+    private func syncMirrorFields() {
+        let mirror = Preferences.shared.npmMirror
+        let editable = (mirror == .custom)
+        registryField.isEditable = editable
+        nodeMirrorField.isEditable = editable
+        registryField.stringValue = mirror.registry ?? (editable ? (Preferences.shared.npmRegistry ?? "") : "")
+        nodeMirrorField.stringValue = mirror.nodeDist ?? (editable ? (Preferences.shared.nodeMirror ?? "") : "")
+        for field in [registryField, nodeMirrorField] {
+            field.textColor = editable ? .labelColor : .secondaryLabelColor
+        }
+    }
+
+    @objc private func mirrorPicked() {
+        let chosen = selectedMirror
+        guard chosen != Preferences.shared.npmMirror else { return }
+        Preferences.shared.npmMirror = chosen
+        syncMirrorFields()
+        if chosen == .custom {
+            // Nothing to restart yet: without URLs the choice has no effect, and
+            // claiming a restart is needed would be noise.
+            registryField.window?.makeFirstResponder(registryField)
+            onChanged?()
+            return
+        }
+        requestRestart(reason: "改变下载源会影响下一次代为下载运行时的位置。")
+    }
+
+    @objc private func resetRegistry() {
+        registryField.stringValue = ""
+        commitRegistry()
+    }
+
+    @objc private func resetNodeMirror() {
+        nodeMirrorField.stringValue = ""
+        commitNodeMirror()
+    }
+
+    private func commitRegistry() { commitMirrorURL(registryField, keyPath: \.npmRegistry) }
+    private func commitNodeMirror() { commitMirrorURL(nodeMirrorField, keyPath: \.nodeMirror) }
+
+    /// Store a typed mirror URL, refusing anything npm could not use.
+    private func commitMirrorURL(_ field: NSTextField,
+                                 keyPath: ReferenceWritableKeyPath<Preferences, String?>) {
+        guard Preferences.shared.npmMirror == .custom else { return }
+        let typed = field.stringValue.trimmingCharacters(in: .whitespaces)
+        let stored = Preferences.shared[keyPath: keyPath]
+        if typed.isEmpty {
+            guard stored != nil else { return }
+            Preferences.shared[keyPath: keyPath] = nil
+            requestRestart(reason: "改变下载源会影响下一次代为下载运行时的位置。")
+            return
+        }
+        guard NpmMirror.isUsableURL(typed) else {
+            field.stringValue = stored ?? ""
+            let alert = NSAlert()
+            alert.messageText = "地址无法使用"
+            alert.informativeText = "「\(typed)」不是一个绝对的 http/https 地址，设置未改动。\n\n"
+                + "例如：https://registry.npmmirror.com"
+            alert.addButton(withTitle: "好")
+            alert.runModal()
+            return
+        }
+        guard typed != stored else { return }
+        Preferences.shared[keyPath: keyPath] = typed
+        field.stringValue = typed
+        requestRestart(reason: "改变下载源会影响下一次代为下载运行时的位置。")
     }
 
     private func requestRestart(reason: String) {

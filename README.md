@@ -188,6 +188,7 @@ the window title and every tab's address are derived from it.
 | **Bind address** | `127.0.0.1` by default. See [Letting other devices in](#letting-other-devices-in) before changing it |
 | **Trusted hosts** | extra authorities for the web app's Host-header fence, comma-separated |
 | **Port** | `3080` by default; `DSH_LAUNCHER_PORT` takes precedence over the setting |
+| **Download source** | which npm / Node.js mirror a fetched runtime comes from — see [Mirrors](#mirrors) |
 
 Switching stops the running instance and starts the new one, then reloads every
 tab. If the instance cannot be stopped, the switch is reported as failed rather
@@ -211,6 +212,48 @@ talk to `127.0.0.1` regardless of what was bound — `0.0.0.0` names an interfac
 listen on, not an address to connect to. If you do open it up, do so only on a
 network where you trust every device, and prefer an SSH tunnel or a
 reverse proxy that authenticates in front of dsh.
+
+## Mirrors
+
+For networks where `registry.npmjs.org` and `nodejs.org` are slow or blocked. This
+applies to what the app fetches itself — the pinned Node.js build and the managed
+dsh — and is chosen in Preferences or with `--mirror`:
+
+```sh
+"$L" mirrors                              # list the built-in ones
+"$L" --mirror npmmirror runtime install
+"$L" --registry https://npm.internal.example/ runtime install
+```
+
+| Name | npm registry | Node.js |
+|---|---|---|
+| `npmjs` | `registry.npmjs.org` | `nodejs.org/dist` |
+| `npmmirror` | `registry.npmmirror.com` | `npmmirror.com/mirrors/node` |
+| `tencent` | `mirrors.cloud.tencent.com/npm` | `mirrors.cloud.tencent.com/nodejs-release` |
+| `huawei` | `repo.huaweicloud.com/repository/npm` | `repo.huaweicloud.com/nodejs` |
+
+`--registry` and `--node-mirror` set either half on its own, and override a preset
+when combined with one.
+
+**Nothing is passed by default.** npm then reads your own `~/.npmrc`, which is
+where a proxy and any credentials live — forcing `registry.npmjs.org` would break
+exactly the setups this option exists for. Pick `npmjs` explicitly if you want to
+override an `.npmrc` rather than inherit it.
+
+The two halves are not equally consequential, and it is worth being clear about
+why:
+
+- **A Node.js mirror is not a trust decision.** The expected SHA-256 is pinned in
+  the launcher, so a mirror serving anything else is refused and nothing is
+  unpacked. The mirrors above were checked to serve tarballs byte-identical to
+  nodejs.org's.
+- **An npm registry is one.** npm verifies integrity hashes that the registry
+  itself supplies, so choosing a registry is choosing who to trust for package
+  contents. Hence a short list of well-known operators rather than a long one.
+
+The multi-folder backend is not covered by this: `dsh-mfw` runs its own package
+manager to prepare its runtime, and follows your npm/pnpm configuration. Set the
+registry in `~/.npmrc` (or `pnpm config set registry …`) for that path.
 
 ## Updates
 
@@ -286,6 +329,7 @@ L="$HOME/Applications/DSH Desktop.app/Contents/MacOS/launcher"
 "$L" launch     # start + open
 "$L" update check    # compare this bundle against the latest release
 "$L" update install  # download it, verify it, and replace this bundle
+"$L" mirrors         # list the built-in npm / Node.js mirrors
 "$L" help
 ```
 
@@ -293,6 +337,9 @@ L="$HOME/Applications/DSH Desktop.app/Contents/MacOS/launcher"
 |---|---|---|
 | `--port <n>` | `DSH_LAUNCHER_PORT` | `3080` |
 | `--host <host>` | `DSH_LAUNCHER_HOST` | `127.0.0.1` (see [above](#letting-other-devices-in)) |
+| `--mirror <name>` | `DSH_LAUNCHER_MIRROR` | none; see [Mirrors](#mirrors) |
+| `--registry <url>` | `DSH_LAUNCHER_NPM_REGISTRY` | inherit `~/.npmrc` |
+| `--node-mirror <url>` | `DSH_LAUNCHER_NODE_DIST` | `https://nodejs.org/dist` |
 | `--trusted-host <authority>` | `DSH_LAUNCHER_TRUSTED_HOSTS` (newline-separated) | none; repeatable |
 | `--backend <stock\|mfw>` | `DSH_LAUNCHER_BACKEND` | `stock` |
 | `--dsh <path>` | `DSH_LAUNCHER_DSH` | probed, then cached in the state dir |

@@ -1,5 +1,7 @@
 # DSH Desktop for macOS
 
+> **已归档。** 本项目已被官方 DeepSeek Harness 桌面 App 取代。仓库保留为只读参考，不再计划发布新版本。
+
 [![CI](https://github.com/Boy-Grid/deepseek-harness-desktop-for-macos/actions/workflows/ci.yml/badge.svg)](https://github.com/Boy-Grid/deepseek-harness-desktop-for-macos/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)
